@@ -1,0 +1,456 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 60;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		4AA604442FEF5726005B1D09 /* SceneDefinition.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AA604432FEF5726005B1D09 /* SceneDefinition.swift */; };
+		4AA604462FEF5734005B1D09 /* SceneRegistry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AA604452FEF5734005B1D09 /* SceneRegistry.swift */; };
+		4AA6051C2FEF5E9B005B1D09 /* SoftwareUpdateScene.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AA6050B2FEF5E9B005B1D09 /* SoftwareUpdateScene.swift */; };
+		4AA6051D2FEF5E9B005B1D09 /* MigrationScene.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AA605052FEF5E9B005B1D09 /* MigrationScene.swift */; };
+		4AA6051E2FEF5E9B005B1D09 /* ScreenTimeScene.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AA605072FEF5E9B005B1D09 /* ScreenTimeScene.swift */; };
+		4AA6051F2FEF5E9B005B1D09 /* ComputerAccountScene.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AA604F52FEF5E9B005B1D09 /* ComputerAccountScene.swift */; };
+		4AA605202FEF5E9B005B1D09 /* LocationServicesScene.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AA605032FEF5E9B005B1D09 /* LocationServicesScene.swift */; };
+		4AA605212FEF5E9B005B1D09 /* WelcomeScene.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AA605152FEF5E9B005B1D09 /* WelcomeScene.swift */; };
+		4AA605222FEF5E9B005B1D09 /* KeyboardScene.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AA604FF2FEF5E9B005B1D09 /* KeyboardScene.swift */; };
+		4AA605232FEF5E9B005B1D09 /* CreateMacAccountScene.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AA604F92FEF5E9B005B1D09 /* CreateMacAccountScene.swift */; };
+		4AA605242FEF5E9B005B1D09 /* SiriScene.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AA605092FEF5E9B005B1D09 /* SiriScene.swift */; };
+		4AA605252FEF5E9B005B1D09 /* AppearanceScene.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AA604F12FEF5E9B005B1D09 /* AppearanceScene.swift */; };
+		4AA605262FEF5E9B005B1D09 /* TermsAndConditionsScene.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AA6050F2FEF5E9B005B1D09 /* TermsAndConditionsScene.swift */; };
+		4AA605272FEF5E9B005B1D09 /* AnalyticsScene.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AA604EF2FEF5E9B005B1D09 /* AnalyticsScene.swift */; };
+		4AA605282FEF5E9B005B1D09 /* LanguageScene.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AA605012FEF5E9B005B1D09 /* LanguageScene.swift */; };
+		4AA605292FEF5E9B005B1D09 /* SpokenLanguageScene.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AA6050D2FEF5E9B005B1D09 /* SpokenLanguageScene.swift */; };
+		4AA6052A2FEF5E9B005B1D09 /* WrittenLanguageScene.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AA605192FEF5E9B005B1D09 /* WrittenLanguageScene.swift */; };
+		4AA6052B2FEF5E9B005B1D09 /* TimeZoneScene.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AA605112FEF5E9B005B1D09 /* TimeZoneScene.swift */; };
+		4AA6052C2FEF5E9B005B1D09 /* DataPrivacyScene.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AA604FB2FEF5E9B005B1D09 /* DataPrivacyScene.swift */; };
+		4AA6052D2FEF5E9B005B1D09 /* TouchIDScene.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AA605132FEF5E9B005B1D09 /* TouchIDScene.swift */; };
+		4AA6052E2FEF5E9B005B1D09 /* CountryRegionScene.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AA604F72FEF5E9B005B1D09 /* CountryRegionScene.swift */; };
+		4AA6052F2FEF5E9B005B1D09 /* WiFiScene.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AA605172FEF5E9B005B1D09 /* WiFiScene.swift */; };
+		4AA605302FEF5E9B005B1D09 /* AppleAccountSignInScene.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AA604F32FEF5E9B005B1D09 /* AppleAccountSignInScene.swift */; };
+		4AA605312FEF5E9B005B1D09 /* FileVaultScene.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AA604FD2FEF5E9B005B1D09 /* FileVaultScene.swift */; };
+		4AA605322FEF5E9B005B1D09 /* AccessibilityScene.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AA604ED2FEF5E9B005B1D09 /* AccessibilityScene.swift */; };
+		4AA605332FEF5E9B005B1D09 /* ScreenTimeScene.swift.bak in Resources */ = {isa = PBXBuildFile; fileRef = 4AA605082FEF5E9B005B1D09 /* ScreenTimeScene.swift.bak */; };
+		4AA605342FEF5E9B005B1D09 /* FileVaultScene.swift.bak in Resources */ = {isa = PBXBuildFile; fileRef = 4AA604FE2FEF5E9B005B1D09 /* FileVaultScene.swift.bak */; };
+		4AA605352FEF5E9B005B1D09 /* LanguageScene.swift.bak in Resources */ = {isa = PBXBuildFile; fileRef = 4AA605022FEF5E9B005B1D09 /* LanguageScene.swift.bak */; };
+		4AA605362FEF5E9B005B1D09 /* CountryRegionScene.swift.bak in Resources */ = {isa = PBXBuildFile; fileRef = 4AA604F82FEF5E9B005B1D09 /* CountryRegionScene.swift.bak */; };
+		4AA605372FEF5E9B005B1D09 /* AppleAccountSignInScene.swift.bak in Resources */ = {isa = PBXBuildFile; fileRef = 4AA604F42FEF5E9B005B1D09 /* AppleAccountSignInScene.swift.bak */; };
+		4AA605382FEF5E9B005B1D09 /* KeyboardScene.swift.bak in Resources */ = {isa = PBXBuildFile; fileRef = 4AA605002FEF5E9B005B1D09 /* KeyboardScene.swift.bak */; };
+		4AA605392FEF5E9B005B1D09 /* SoftwareUpdateScene.swift.bak in Resources */ = {isa = PBXBuildFile; fileRef = 4AA6050C2FEF5E9B005B1D09 /* SoftwareUpdateScene.swift.bak */; };
+		4AA6053A2FEF5E9B005B1D09 /* TermsAndConditionsScene.swift.bak in Resources */ = {isa = PBXBuildFile; fileRef = 4AA605102FEF5E9B005B1D09 /* TermsAndConditionsScene.swift.bak */; };
+		4AA6053B2FEF5E9B005B1D09 /* MigrationScene.swift.bak in Resources */ = {isa = PBXBuildFile; fileRef = 4AA605062FEF5E9B005B1D09 /* MigrationScene.swift.bak */; };
+		4AA6053C2FEF5E9B005B1D09 /* SpokenLanguageScene.swift.bak in Resources */ = {isa = PBXBuildFile; fileRef = 4AA6050E2FEF5E9B005B1D09 /* SpokenLanguageScene.swift.bak */; };
+		4AA6053D2FEF5E9B005B1D09 /* WrittenLanguageScene.swift.bak in Resources */ = {isa = PBXBuildFile; fileRef = 4AA6051A2FEF5E9B005B1D09 /* WrittenLanguageScene.swift.bak */; };
+		4AA6053E2FEF5E9B005B1D09 /* DataPrivacyScene.swift.bak in Resources */ = {isa = PBXBuildFile; fileRef = 4AA604FC2FEF5E9B005B1D09 /* DataPrivacyScene.swift.bak */; };
+		4AA6053F2FEF5E9B005B1D09 /* LocationServicesScene.swift.bak in Resources */ = {isa = PBXBuildFile; fileRef = 4AA605042FEF5E9B005B1D09 /* LocationServicesScene.swift.bak */; };
+		4AA605402FEF5E9B005B1D09 /* ComputerAccountScene.swift.bak in Resources */ = {isa = PBXBuildFile; fileRef = 4AA604F62FEF5E9B005B1D09 /* ComputerAccountScene.swift.bak */; };
+		4AA605412FEF5E9B005B1D09 /* CreateMacAccountScene.swift.bak in Resources */ = {isa = PBXBuildFile; fileRef = 4AA604FA2FEF5E9B005B1D09 /* CreateMacAccountScene.swift.bak */; };
+		4AA605422FEF5E9B005B1D09 /* TouchIDScene.swift.bak in Resources */ = {isa = PBXBuildFile; fileRef = 4AA605142FEF5E9B005B1D09 /* TouchIDScene.swift.bak */; };
+		4AA605432FEF5E9B005B1D09 /* WiFiScene.swift.bak in Resources */ = {isa = PBXBuildFile; fileRef = 4AA605182FEF5E9B005B1D09 /* WiFiScene.swift.bak */; };
+		4AA605442FEF5E9B005B1D09 /* SiriScene.swift.bak in Resources */ = {isa = PBXBuildFile; fileRef = 4AA6050A2FEF5E9B005B1D09 /* SiriScene.swift.bak */; };
+		4AA605452FEF5E9B005B1D09 /* AnalyticsScene.swift.bak in Resources */ = {isa = PBXBuildFile; fileRef = 4AA604F02FEF5E9B005B1D09 /* AnalyticsScene.swift.bak */; };
+		4AA605462FEF5E9B005B1D09 /* WelcomeScene.swift.bak in Resources */ = {isa = PBXBuildFile; fileRef = 4AA605162FEF5E9B005B1D09 /* WelcomeScene.swift.bak */; };
+		4AA605472FEF5E9B005B1D09 /* AppearanceScene.swift.bak in Resources */ = {isa = PBXBuildFile; fileRef = 4AA604F22FEF5E9B005B1D09 /* AppearanceScene.swift.bak */; };
+		4AA605482FEF5E9B005B1D09 /* TimeZoneScene.swift.bak in Resources */ = {isa = PBXBuildFile; fileRef = 4AA605122FEF5E9B005B1D09 /* TimeZoneScene.swift.bak */; };
+		4AA605492FEF5E9B005B1D09 /* AccessibilityScene.swift.bak in Resources */ = {isa = PBXBuildFile; fileRef = 4AA604EE2FEF5E9B005B1D09 /* AccessibilityScene.swift.bak */; };
+		4AA6054B2FEF62FF005B1D09 /* CLI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AA6054A2FEF62FF005B1D09 /* CLI.swift */; };
+		4AA6054D2FEF63DC005B1D09 /* ImageScaling.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AA6054C2FEF63DC005B1D09 /* ImageScaling.swift */; };
+		4AA6054F2FEF78C2005B1D09 /* NoICloudConfirmScene.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AA6054E2FEF78C2005B1D09 /* NoICloudConfirmScene.swift */; };
+		4AA605552FEF7EAB005B1D09 /* Server.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AA605542FEF7EAB005B1D09 /* Server.swift */; };
+		A1 /* VisionControlScannerApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1 /* VisionControlScannerApp.swift */; };
+		A2 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2 /* ContentView.swift */; };
+		A3 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3 /* Models.swift */; };
+		A4 /* Utilities.swift in Sources */ = {isa = PBXBuildFile; fileRef = F4 /* Utilities.swift */; };
+		A5 /* VisionControlDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = F5 /* VisionControlDetector.swift */; };
+		A6 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F6 /* Assets.xcassets */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		4AA604432FEF5726005B1D09 /* SceneDefinition.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneDefinition.swift; sourceTree = "<group>"; };
+		4AA604452FEF5734005B1D09 /* SceneRegistry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneRegistry.swift; sourceTree = "<group>"; };
+		4AA604ED2FEF5E9B005B1D09 /* AccessibilityScene.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccessibilityScene.swift; sourceTree = "<group>"; };
+		4AA604EE2FEF5E9B005B1D09 /* AccessibilityScene.swift.bak */ = {isa = PBXFileReference; lastKnownFileType = text; path = AccessibilityScene.swift.bak; sourceTree = "<group>"; };
+		4AA604EF2FEF5E9B005B1D09 /* AnalyticsScene.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnalyticsScene.swift; sourceTree = "<group>"; };
+		4AA604F02FEF5E9B005B1D09 /* AnalyticsScene.swift.bak */ = {isa = PBXFileReference; lastKnownFileType = text; path = AnalyticsScene.swift.bak; sourceTree = "<group>"; };
+		4AA604F12FEF5E9B005B1D09 /* AppearanceScene.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppearanceScene.swift; sourceTree = "<group>"; };
+		4AA604F22FEF5E9B005B1D09 /* AppearanceScene.swift.bak */ = {isa = PBXFileReference; lastKnownFileType = text; path = AppearanceScene.swift.bak; sourceTree = "<group>"; };
+		4AA604F32FEF5E9B005B1D09 /* AppleAccountSignInScene.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleAccountSignInScene.swift; sourceTree = "<group>"; };
+		4AA604F42FEF5E9B005B1D09 /* AppleAccountSignInScene.swift.bak */ = {isa = PBXFileReference; lastKnownFileType = text; path = AppleAccountSignInScene.swift.bak; sourceTree = "<group>"; };
+		4AA604F52FEF5E9B005B1D09 /* ComputerAccountScene.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerAccountScene.swift; sourceTree = "<group>"; };
+		4AA604F62FEF5E9B005B1D09 /* ComputerAccountScene.swift.bak */ = {isa = PBXFileReference; lastKnownFileType = text; path = ComputerAccountScene.swift.bak; sourceTree = "<group>"; };
+		4AA604F72FEF5E9B005B1D09 /* CountryRegionScene.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CountryRegionScene.swift; sourceTree = "<group>"; };
+		4AA604F82FEF5E9B005B1D09 /* CountryRegionScene.swift.bak */ = {isa = PBXFileReference; lastKnownFileType = text; path = CountryRegionScene.swift.bak; sourceTree = "<group>"; };
+		4AA604F92FEF5E9B005B1D09 /* CreateMacAccountScene.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CreateMacAccountScene.swift; sourceTree = "<group>"; };
+		4AA604FA2FEF5E9B005B1D09 /* CreateMacAccountScene.swift.bak */ = {isa = PBXFileReference; lastKnownFileType = text; path = CreateMacAccountScene.swift.bak; sourceTree = "<group>"; };
+		4AA604FB2FEF5E9B005B1D09 /* DataPrivacyScene.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DataPrivacyScene.swift; sourceTree = "<group>"; };
+		4AA604FC2FEF5E9B005B1D09 /* DataPrivacyScene.swift.bak */ = {isa = PBXFileReference; lastKnownFileType = text; path = DataPrivacyScene.swift.bak; sourceTree = "<group>"; };
+		4AA604FD2FEF5E9B005B1D09 /* FileVaultScene.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileVaultScene.swift; sourceTree = "<group>"; };
+		4AA604FE2FEF5E9B005B1D09 /* FileVaultScene.swift.bak */ = {isa = PBXFileReference; lastKnownFileType = text; path = FileVaultScene.swift.bak; sourceTree = "<group>"; };
+		4AA604FF2FEF5E9B005B1D09 /* KeyboardScene.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardScene.swift; sourceTree = "<group>"; };
+		4AA605002FEF5E9B005B1D09 /* KeyboardScene.swift.bak */ = {isa = PBXFileReference; lastKnownFileType = text; path = KeyboardScene.swift.bak; sourceTree = "<group>"; };
+		4AA605012FEF5E9B005B1D09 /* LanguageScene.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LanguageScene.swift; sourceTree = "<group>"; };
+		4AA605022FEF5E9B005B1D09 /* LanguageScene.swift.bak */ = {isa = PBXFileReference; lastKnownFileType = text; path = LanguageScene.swift.bak; sourceTree = "<group>"; };
+		4AA605032FEF5E9B005B1D09 /* LocationServicesScene.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocationServicesScene.swift; sourceTree = "<group>"; };
+		4AA605042FEF5E9B005B1D09 /* LocationServicesScene.swift.bak */ = {isa = PBXFileReference; lastKnownFileType = text; path = LocationServicesScene.swift.bak; sourceTree = "<group>"; };
+		4AA605052FEF5E9B005B1D09 /* MigrationScene.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MigrationScene.swift; sourceTree = "<group>"; };
+		4AA605062FEF5E9B005B1D09 /* MigrationScene.swift.bak */ = {isa = PBXFileReference; lastKnownFileType = text; path = MigrationScene.swift.bak; sourceTree = "<group>"; };
+		4AA605072FEF5E9B005B1D09 /* ScreenTimeScene.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenTimeScene.swift; sourceTree = "<group>"; };
+		4AA605082FEF5E9B005B1D09 /* ScreenTimeScene.swift.bak */ = {isa = PBXFileReference; lastKnownFileType = text; path = ScreenTimeScene.swift.bak; sourceTree = "<group>"; };
+		4AA605092FEF5E9B005B1D09 /* SiriScene.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SiriScene.swift; sourceTree = "<group>"; };
+		4AA6050A2FEF5E9B005B1D09 /* SiriScene.swift.bak */ = {isa = PBXFileReference; lastKnownFileType = text; path = SiriScene.swift.bak; sourceTree = "<group>"; };
+		4AA6050B2FEF5E9B005B1D09 /* SoftwareUpdateScene.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SoftwareUpdateScene.swift; sourceTree = "<group>"; };
+		4AA6050C2FEF5E9B005B1D09 /* SoftwareUpdateScene.swift.bak */ = {isa = PBXFileReference; lastKnownFileType = text; path = SoftwareUpdateScene.swift.bak; sourceTree = "<group>"; };
+		4AA6050D2FEF5E9B005B1D09 /* SpokenLanguageScene.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpokenLanguageScene.swift; sourceTree = "<group>"; };
+		4AA6050E2FEF5E9B005B1D09 /* SpokenLanguageScene.swift.bak */ = {isa = PBXFileReference; lastKnownFileType = text; path = SpokenLanguageScene.swift.bak; sourceTree = "<group>"; };
+		4AA6050F2FEF5E9B005B1D09 /* TermsAndConditionsScene.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TermsAndConditionsScene.swift; sourceTree = "<group>"; };
+		4AA605102FEF5E9B005B1D09 /* TermsAndConditionsScene.swift.bak */ = {isa = PBXFileReference; lastKnownFileType = text; path = TermsAndConditionsScene.swift.bak; sourceTree = "<group>"; };
+		4AA605112FEF5E9B005B1D09 /* TimeZoneScene.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimeZoneScene.swift; sourceTree = "<group>"; };
+		4AA605122FEF5E9B005B1D09 /* TimeZoneScene.swift.bak */ = {isa = PBXFileReference; lastKnownFileType = text; path = TimeZoneScene.swift.bak; sourceTree = "<group>"; };
+		4AA605132FEF5E9B005B1D09 /* TouchIDScene.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TouchIDScene.swift; sourceTree = "<group>"; };
+		4AA605142FEF5E9B005B1D09 /* TouchIDScene.swift.bak */ = {isa = PBXFileReference; lastKnownFileType = text; path = TouchIDScene.swift.bak; sourceTree = "<group>"; };
+		4AA605152FEF5E9B005B1D09 /* WelcomeScene.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WelcomeScene.swift; sourceTree = "<group>"; };
+		4AA605162FEF5E9B005B1D09 /* WelcomeScene.swift.bak */ = {isa = PBXFileReference; lastKnownFileType = text; path = WelcomeScene.swift.bak; sourceTree = "<group>"; };
+		4AA605172FEF5E9B005B1D09 /* WiFiScene.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WiFiScene.swift; sourceTree = "<group>"; };
+		4AA605182FEF5E9B005B1D09 /* WiFiScene.swift.bak */ = {isa = PBXFileReference; lastKnownFileType = text; path = WiFiScene.swift.bak; sourceTree = "<group>"; };
+		4AA605192FEF5E9B005B1D09 /* WrittenLanguageScene.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WrittenLanguageScene.swift; sourceTree = "<group>"; };
+		4AA6051A2FEF5E9B005B1D09 /* WrittenLanguageScene.swift.bak */ = {isa = PBXFileReference; lastKnownFileType = text; path = WrittenLanguageScene.swift.bak; sourceTree = "<group>"; };
+		4AA6054A2FEF62FF005B1D09 /* CLI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLI.swift; sourceTree = "<group>"; };
+		4AA6054C2FEF63DC005B1D09 /* ImageScaling.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageScaling.swift; sourceTree = "<group>"; };
+		4AA6054E2FEF78C2005B1D09 /* NoICloudConfirmScene.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoICloudConfirmScene.swift; sourceTree = "<group>"; };
+		4AA605542FEF7EAB005B1D09 /* Server.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Server.swift; sourceTree = "<group>"; };
+		F1 /* VisionControlScannerApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VisionControlScannerApp.swift; sourceTree = "<group>"; };
+		F2 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		F3 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
+		F4 /* Utilities.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Utilities.swift; sourceTree = "<group>"; };
+		F5 /* VisionControlDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VisionControlDetector.swift; sourceTree = "<group>"; };
+		F6 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		P1 /* VisionControlScannerApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; path = VisionControlScannerApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		FW /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		4AA6051B2FEF5E9B005B1D09 /* Scenes */ = {
+			isa = PBXGroup;
+			children = (
+				4AA6054E2FEF78C2005B1D09 /* NoICloudConfirmScene.swift */,
+				4AA604ED2FEF5E9B005B1D09 /* AccessibilityScene.swift */,
+				4AA604EE2FEF5E9B005B1D09 /* AccessibilityScene.swift.bak */,
+				4AA604EF2FEF5E9B005B1D09 /* AnalyticsScene.swift */,
+				4AA604F02FEF5E9B005B1D09 /* AnalyticsScene.swift.bak */,
+				4AA604F12FEF5E9B005B1D09 /* AppearanceScene.swift */,
+				4AA604F22FEF5E9B005B1D09 /* AppearanceScene.swift.bak */,
+				4AA604F32FEF5E9B005B1D09 /* AppleAccountSignInScene.swift */,
+				4AA604F42FEF5E9B005B1D09 /* AppleAccountSignInScene.swift.bak */,
+				4AA604F52FEF5E9B005B1D09 /* ComputerAccountScene.swift */,
+				4AA604F62FEF5E9B005B1D09 /* ComputerAccountScene.swift.bak */,
+				4AA604F72FEF5E9B005B1D09 /* CountryRegionScene.swift */,
+				4AA604F82FEF5E9B005B1D09 /* CountryRegionScene.swift.bak */,
+				4AA604F92FEF5E9B005B1D09 /* CreateMacAccountScene.swift */,
+				4AA604FA2FEF5E9B005B1D09 /* CreateMacAccountScene.swift.bak */,
+				4AA604FB2FEF5E9B005B1D09 /* DataPrivacyScene.swift */,
+				4AA604FC2FEF5E9B005B1D09 /* DataPrivacyScene.swift.bak */,
+				4AA604FD2FEF5E9B005B1D09 /* FileVaultScene.swift */,
+				4AA604FE2FEF5E9B005B1D09 /* FileVaultScene.swift.bak */,
+				4AA604FF2FEF5E9B005B1D09 /* KeyboardScene.swift */,
+				4AA605002FEF5E9B005B1D09 /* KeyboardScene.swift.bak */,
+				4AA605012FEF5E9B005B1D09 /* LanguageScene.swift */,
+				4AA605022FEF5E9B005B1D09 /* LanguageScene.swift.bak */,
+				4AA605032FEF5E9B005B1D09 /* LocationServicesScene.swift */,
+				4AA605042FEF5E9B005B1D09 /* LocationServicesScene.swift.bak */,
+				4AA605052FEF5E9B005B1D09 /* MigrationScene.swift */,
+				4AA605062FEF5E9B005B1D09 /* MigrationScene.swift.bak */,
+				4AA605072FEF5E9B005B1D09 /* ScreenTimeScene.swift */,
+				4AA605082FEF5E9B005B1D09 /* ScreenTimeScene.swift.bak */,
+				4AA605092FEF5E9B005B1D09 /* SiriScene.swift */,
+				4AA6050A2FEF5E9B005B1D09 /* SiriScene.swift.bak */,
+				4AA6050B2FEF5E9B005B1D09 /* SoftwareUpdateScene.swift */,
+				4AA6050C2FEF5E9B005B1D09 /* SoftwareUpdateScene.swift.bak */,
+				4AA6050D2FEF5E9B005B1D09 /* SpokenLanguageScene.swift */,
+				4AA6050E2FEF5E9B005B1D09 /* SpokenLanguageScene.swift.bak */,
+				4AA6050F2FEF5E9B005B1D09 /* TermsAndConditionsScene.swift */,
+				4AA605102FEF5E9B005B1D09 /* TermsAndConditionsScene.swift.bak */,
+				4AA605112FEF5E9B005B1D09 /* TimeZoneScene.swift */,
+				4AA605122FEF5E9B005B1D09 /* TimeZoneScene.swift.bak */,
+				4AA605132FEF5E9B005B1D09 /* TouchIDScene.swift */,
+				4AA605142FEF5E9B005B1D09 /* TouchIDScene.swift.bak */,
+				4AA605152FEF5E9B005B1D09 /* WelcomeScene.swift */,
+				4AA605162FEF5E9B005B1D09 /* WelcomeScene.swift.bak */,
+				4AA605172FEF5E9B005B1D09 /* WiFiScene.swift */,
+				4AA605182FEF5E9B005B1D09 /* WiFiScene.swift.bak */,
+				4AA605192FEF5E9B005B1D09 /* WrittenLanguageScene.swift */,
+				4AA6051A2FEF5E9B005B1D09 /* WrittenLanguageScene.swift.bak */,
+			);
+			path = Scenes;
+			sourceTree = "<group>";
+		};
+		G0 = {
+			isa = PBXGroup;
+			children = (
+				G1 /* VisionControlScannerApp */,
+				G2 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		G1 /* VisionControlScannerApp */ = {
+			isa = PBXGroup;
+			children = (
+				4AA6051B2FEF5E9B005B1D09 /* Scenes */,
+				4AA604432FEF5726005B1D09 /* SceneDefinition.swift */,
+				4AA604452FEF5734005B1D09 /* SceneRegistry.swift */,
+				F1 /* VisionControlScannerApp.swift */,
+				4AA6054C2FEF63DC005B1D09 /* ImageScaling.swift */,
+				F2 /* ContentView.swift */,
+				F3 /* Models.swift */,
+				F4 /* Utilities.swift */,
+				F5 /* VisionControlDetector.swift */,
+				4AA605542FEF7EAB005B1D09 /* Server.swift */,
+				4AA6054A2FEF62FF005B1D09 /* CLI.swift */,
+				F6 /* Assets.xcassets */,
+			);
+			path = VisionControlScannerApp;
+			sourceTree = "<group>";
+		};
+		G2 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				P1 /* VisionControlScannerApp.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		T0 /* VisionControlScannerApp */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = CL1 /* Build configuration list for PBXNativeTarget "VisionControlScannerApp" */;
+			buildPhases = (
+				S0 /* Sources */,
+				FW /* Frameworks */,
+				R0 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = VisionControlScannerApp;
+			productName = VisionControlScannerApp;
+			productReference = P1 /* VisionControlScannerApp.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		PR /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1600;
+				LastUpgradeCheck = 1600;
+				TargetAttributes = {
+					T0 = {
+						CreatedOnToolsVersion = 16.0;
+					};
+				};
+			};
+			buildConfigurationList = CL2 /* Build configuration list for PBXProject "VisionControlScannerApp" */;
+			compatibilityVersion = "Xcode 15.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = G0;
+			productRefGroup = G2 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				T0 /* VisionControlScannerApp */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		R0 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				4AA605332FEF5E9B005B1D09 /* ScreenTimeScene.swift.bak in Resources */,
+				4AA605342FEF5E9B005B1D09 /* FileVaultScene.swift.bak in Resources */,
+				4AA605352FEF5E9B005B1D09 /* LanguageScene.swift.bak in Resources */,
+				4AA605362FEF5E9B005B1D09 /* CountryRegionScene.swift.bak in Resources */,
+				4AA605372FEF5E9B005B1D09 /* AppleAccountSignInScene.swift.bak in Resources */,
+				4AA605382FEF5E9B005B1D09 /* KeyboardScene.swift.bak in Resources */,
+				4AA605392FEF5E9B005B1D09 /* SoftwareUpdateScene.swift.bak in Resources */,
+				4AA6053A2FEF5E9B005B1D09 /* TermsAndConditionsScene.swift.bak in Resources */,
+				4AA6053B2FEF5E9B005B1D09 /* MigrationScene.swift.bak in Resources */,
+				4AA6053C2FEF5E9B005B1D09 /* SpokenLanguageScene.swift.bak in Resources */,
+				4AA6053D2FEF5E9B005B1D09 /* WrittenLanguageScene.swift.bak in Resources */,
+				4AA6053E2FEF5E9B005B1D09 /* DataPrivacyScene.swift.bak in Resources */,
+				4AA6053F2FEF5E9B005B1D09 /* LocationServicesScene.swift.bak in Resources */,
+				4AA605402FEF5E9B005B1D09 /* ComputerAccountScene.swift.bak in Resources */,
+				4AA605412FEF5E9B005B1D09 /* CreateMacAccountScene.swift.bak in Resources */,
+				4AA605422FEF5E9B005B1D09 /* TouchIDScene.swift.bak in Resources */,
+				4AA605432FEF5E9B005B1D09 /* WiFiScene.swift.bak in Resources */,
+				4AA605442FEF5E9B005B1D09 /* SiriScene.swift.bak in Resources */,
+				4AA605452FEF5E9B005B1D09 /* AnalyticsScene.swift.bak in Resources */,
+				4AA605462FEF5E9B005B1D09 /* WelcomeScene.swift.bak in Resources */,
+				4AA605472FEF5E9B005B1D09 /* AppearanceScene.swift.bak in Resources */,
+				4AA605482FEF5E9B005B1D09 /* TimeZoneScene.swift.bak in Resources */,
+				4AA605492FEF5E9B005B1D09 /* AccessibilityScene.swift.bak in Resources */,
+				A6 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		S0 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				4AA6051C2FEF5E9B005B1D09 /* SoftwareUpdateScene.swift in Sources */,
+				4AA6051D2FEF5E9B005B1D09 /* MigrationScene.swift in Sources */,
+				4AA6051E2FEF5E9B005B1D09 /* ScreenTimeScene.swift in Sources */,
+				4AA6051F2FEF5E9B005B1D09 /* ComputerAccountScene.swift in Sources */,
+				4AA605202FEF5E9B005B1D09 /* LocationServicesScene.swift in Sources */,
+				4AA605212FEF5E9B005B1D09 /* WelcomeScene.swift in Sources */,
+				4AA605222FEF5E9B005B1D09 /* KeyboardScene.swift in Sources */,
+				4AA6054F2FEF78C2005B1D09 /* NoICloudConfirmScene.swift in Sources */,
+				4AA605232FEF5E9B005B1D09 /* CreateMacAccountScene.swift in Sources */,
+				4AA605242FEF5E9B005B1D09 /* SiriScene.swift in Sources */,
+				4AA605252FEF5E9B005B1D09 /* AppearanceScene.swift in Sources */,
+				4AA605262FEF5E9B005B1D09 /* TermsAndConditionsScene.swift in Sources */,
+				4AA605272FEF5E9B005B1D09 /* AnalyticsScene.swift in Sources */,
+				4AA6054B2FEF62FF005B1D09 /* CLI.swift in Sources */,
+				4AA605552FEF7EAB005B1D09 /* Server.swift in Sources */,
+				4AA605282FEF5E9B005B1D09 /* LanguageScene.swift in Sources */,
+				4AA605292FEF5E9B005B1D09 /* SpokenLanguageScene.swift in Sources */,
+				4AA6052A2FEF5E9B005B1D09 /* WrittenLanguageScene.swift in Sources */,
+				4AA6052B2FEF5E9B005B1D09 /* TimeZoneScene.swift in Sources */,
+				4AA6054D2FEF63DC005B1D09 /* ImageScaling.swift in Sources */,
+				4AA6052C2FEF5E9B005B1D09 /* DataPrivacyScene.swift in Sources */,
+				4AA6052D2FEF5E9B005B1D09 /* TouchIDScene.swift in Sources */,
+				4AA6052E2FEF5E9B005B1D09 /* CountryRegionScene.swift in Sources */,
+				4AA6052F2FEF5E9B005B1D09 /* WiFiScene.swift in Sources */,
+				4AA605302FEF5E9B005B1D09 /* AppleAccountSignInScene.swift in Sources */,
+				4AA605312FEF5E9B005B1D09 /* FileVaultScene.swift in Sources */,
+				4AA605322FEF5E9B005B1D09 /* AccessibilityScene.swift in Sources */,
+				A1 /* VisionControlScannerApp.swift in Sources */,
+				A2 /* ContentView.swift in Sources */,
+				4AA604442FEF5726005B1D09 /* SceneDefinition.swift in Sources */,
+				A3 /* Models.swift in Sources */,
+				4AA604462FEF5734005B1D09 /* SceneRegistry.swift in Sources */,
+				A4 /* Utilities.swift in Sources */,
+				A5 /* VisionControlDetector.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		C1 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = VisionControlScannerApp;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.local.VisionControlScannerSceneGrammarClean;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		C2 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = VisionControlScannerApp;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.local.VisionControlScannerSceneGrammarClean;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		C3 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				SDKROOT = macosx;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		C4 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				SDKROOT = macosx;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		CL1 /* Build configuration list for PBXNativeTarget "VisionControlScannerApp" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C1 /* Debug */,
+				C2 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		CL2 /* Build configuration list for PBXProject "VisionControlScannerApp" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C3 /* Debug */,
+				C4 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = PR /* Project object */;
+}
