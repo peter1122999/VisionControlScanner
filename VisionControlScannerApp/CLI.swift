@@ -1,11 +1,3 @@
-//
-//  CLI.swift
-//  VisionControlScannerApp
-//
-//  Created by Avery Varney on 6/26/26.
-//
-
-
 import Foundation
 import AppKit
 import CoreGraphics
@@ -19,9 +11,8 @@ enum CLI {
     static func runIfNeeded() -> Bool {
         let args = CommandLine.arguments
         guard args.count > 1 else { return false }
-        
 
-        // Strip leading binary path; also ignore Xcode's launcher args.
+        // Strip Xcode debugger noise.
         let userArgs = Array(args.dropFirst()).filter {
             !$0.hasPrefix("-NSDocumentRevisionsDebugMode") &&
             !$0.hasPrefix("YES")
@@ -30,12 +21,12 @@ enum CLI {
         guard let command = userArgs.first else { return false }
 
         switch command {
-        case "serve":
-            serve(Array(userArgs.dropFirst()))
         case "analyze":
             analyze(Array(userArgs.dropFirst()))
         case "watch":
             watch(Array(userArgs.dropFirst()))
+        case "serve":
+            serve(Array(userArgs.dropFirst()))
         case "--help", "-h", "help":
             printUsage()
             exit(0)
@@ -48,6 +39,232 @@ enum CLI {
         }
         return true
     }
+
+    // MARK: - analyze
+
+    private static func analyze(_ args: [String]) {
+        var inputPath: String?
+        var outputPath: String?
+        var jsonMode = true
+        var prettyPrint = true
+        var maxHeight: Int = 720
+        var format: String = "default"   // "default" | "tart"
+
+        var i = 0
+        while i < args.count {
+            let arg = args[i]
+            switch arg {
+            case "-o", "--output":
+                guard i + 1 < args.count else { fatal("Missing value for \(arg)") }
+                outputPath = args[i + 1]; i += 2
+            case "--text":
+                jsonMode = false; i += 1
+            case "--compact":
+                prettyPrint = false; i += 1
+            case "--max-height":
+                guard i + 1 < args.count, let h = Int(args[i + 1]) else {
+                    fatal("Missing or invalid value for --max-height")
+                }
+                maxHeight = h; i += 2
+            case "--full-resolution":
+                maxHeight = 0; i += 1
+            case "--format":
+                guard i + 1 < args.count else { fatal("Missing value for --format") }
+                format = args[i + 1].lowercased()
+                guard format == "default" || format == "tart" else {
+                    fatal("--format must be 'default' or 'tart'")
+                }
+                i += 2
+            default:
+                if inputPath == nil { inputPath = arg }
+                else { fatal("Unexpected argument: \(arg)") }
+                i += 1
+            }
+        }
+
+        guard let inputPath else {
+            fatal("analyze requires an input image path")
+        }
+
+        let url = URL(fileURLWithPath: inputPath)
+        guard let cgImage = loadCGImage(from: url) else {
+            fatal("Could not load image at \(inputPath)")
+        }
+
+        // If a vcs server is reachable, delegate to it for speed. Falls back
+        // to in-process analysis on any failure. Set VCS_SOCKET="" to force
+        // in-process mode.
+        let cap = maxHeight > 0 ? maxHeight : nil
+        let result = analyzeViaServerOrLocal(
+            imagePath: inputPath,
+            cgImage: cgImage,
+            maxHeight: cap
+        )
+
+        let payload: String
+        if jsonMode {
+            switch format {
+            case "tart":
+                payload = encodeTartJSON(
+                    result: result,
+                    sourcePath: inputPath,
+                    imageWidth: cgImage.width,
+                    imageHeight: cgImage.height,
+                    pretty: prettyPrint
+                )
+            default:
+                payload = encodeJSON(
+                    result: result,
+                    sourcePath: inputPath,
+                    pretty: prettyPrint
+                )
+            }
+        } else {
+            payload = encodeText(result: result, sourcePath: inputPath)
+        }
+
+        write(payload, to: outputPath)
+    }
+
+    /// Try the server socket first; fall back to in-process if anything fails.
+    private static func analyzeViaServerOrLocal(
+        imagePath: String,
+        cgImage: CGImage,
+        maxHeight: Int?
+    ) -> AnalysisResult {
+
+        let env = ProcessInfo.processInfo.environment
+        let envSocket = env["VCS_SOCKET"]
+
+        // Empty string explicitly disables server delegation.
+        let socketPath: String?
+        if envSocket == "" {
+            socketPath = nil
+        } else {
+            socketPath = envSocket ?? "/tmp/vcs.sock"
+        }
+
+        if let sp = socketPath, FileManager.default.fileExists(atPath: sp) {
+            if let serverResult = ServerClient.analyze(
+                socketPath: sp,
+                imagePath: imagePath,
+                maxHeight: maxHeight
+            ) {
+                return serverResult
+            }
+            // Fall through to local mode on server error.
+        }
+
+        let detector = VisionControlDetector()
+        do {
+            return try detector.analyze(cgImage: cgImage, maxHeight: maxHeight)
+        } catch {
+            fatal("Analysis failed: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - watch
+
+    private static func watch(_ args: [String]) {
+        var folder: String?
+        var outputDir: String?
+        var maxHeight: Int = 720
+        var format: String = "default"
+
+        var i = 0
+        while i < args.count {
+            let arg = args[i]
+            switch arg {
+            case "-o", "--output":
+                guard i + 1 < args.count else { fatal("Missing value for \(arg)") }
+                outputDir = args[i + 1]; i += 2
+            case "--max-height":
+                guard i + 1 < args.count, let h = Int(args[i + 1]) else {
+                    fatal("Missing or invalid value for --max-height")
+                }
+                maxHeight = h; i += 2
+            case "--full-resolution":
+                maxHeight = 0; i += 1
+            case "--format":
+                guard i + 1 < args.count else { fatal("Missing value for --format") }
+                format = args[i + 1].lowercased()
+                guard format == "default" || format == "tart" else {
+                    fatal("--format must be 'default' or 'tart'")
+                }
+                i += 2
+            default:
+                if folder == nil { folder = arg }
+                else { fatal("Unexpected: \(arg)") }
+                i += 1
+            }
+        }
+
+        guard let folder else { fatal("watch requires a folder path") }
+        let folderURL = URL(fileURLWithPath: folder)
+
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: folder) else {
+            fatal("Folder does not exist: \(folder)")
+        }
+
+        FileHandle.standardError.write(Data("Watching \(folder)\n".utf8))
+
+        var seen = Set<String>(
+            (try? fm.contentsOfDirectory(atPath: folder)) ?? []
+        )
+
+        while true {
+            Thread.sleep(forTimeInterval: 1.0)
+            guard let now = try? fm.contentsOfDirectory(atPath: folder) else { continue }
+            let nowSet = Set(now)
+            let added = nowSet.subtracting(seen)
+            seen = nowSet
+
+            for name in added where isImage(name) {
+                let imageURL = folderURL.appendingPathComponent(name)
+                Thread.sleep(forTimeInterval: 0.4)
+
+                guard let cgImage = loadCGImage(from: imageURL) else { continue }
+                let cap = maxHeight > 0 ? maxHeight : nil
+                let result = analyzeViaServerOrLocal(
+                    imagePath: imageURL.path,
+                    cgImage: cgImage,
+                    maxHeight: cap
+                )
+
+                let payload: String
+                switch format {
+                case "tart":
+                    payload = encodeTartJSON(
+                        result: result,
+                        sourcePath: imageURL.path,
+                        imageWidth: cgImage.width,
+                        imageHeight: cgImage.height,
+                        pretty: false
+                    )
+                default:
+                    payload = encodeJSON(
+                        result: result,
+                        sourcePath: imageURL.path,
+                        pretty: false
+                    )
+                }
+
+                if let outputDir {
+                    let base = (name as NSString).deletingPathExtension
+                    let outURL = URL(fileURLWithPath: outputDir)
+                        .appendingPathComponent("\(base).json")
+                    try? payload.write(to: outURL, atomically: true, encoding: .utf8)
+                    FileHandle.standardError.write(Data("→ \(outURL.path)\n".utf8))
+                } else {
+                    print(payload)
+                }
+            }
+        }
+    }
+
+    // MARK: - serve
+
     private static func serve(_ args: [String]) {
         var socketPath = "/tmp/vcs.sock"
         var maxHeight = 720
@@ -75,130 +292,9 @@ enum CLI {
         }
     }
 
-    // MARK: - Commands
+    // MARK: - Encoders
 
-    private static func analyze(_ args: [String]) {
-        var inputPath: String?
-        var outputPath: String?
-        var jsonMode = true
-        var prettyPrint = true
-
-        var i = 0
-        while i < args.count {
-            let arg = args[i]
-            switch arg {
-            case "-o", "--output":
-                guard i + 1 < args.count else { fatal("Missing value for \(arg)") }
-                outputPath = args[i + 1]; i += 2
-            case "--text":
-                jsonMode = false; i += 1
-            case "--compact":
-                prettyPrint = false; i += 1
-            default:
-                if inputPath == nil {
-                    inputPath = arg
-                } else {
-                    fatal("Unexpected argument: \(arg)")
-                }
-                i += 1
-            }
-        }
-
-        guard let inputPath else {
-            fatal("analyze requires an input image path")
-        }
-
-        let url = URL(fileURLWithPath: inputPath)
-        guard let cgImage = loadCGImage(from: url) else {
-            fatal("Could not load image at \(inputPath)")
-        }
-
-        let detector = VisionControlDetector()
-        let result: AnalysisResult
-        do {
-            result = try detector.analyze(cgImage: cgImage)
-        } catch {
-            fatal("Analysis failed: \(error.localizedDescription)")
-        }
-
-        let payload: String
-        if jsonMode {
-            payload = encodeJSON(result: result, sourcePath: inputPath, pretty: prettyPrint)
-        } else {
-            payload = encodeText(result: result, sourcePath: inputPath)
-        }
-
-        write(payload, to: outputPath)
-    }
-
-    private static func watch(_ args: [String]) {
-        var folder: String?
-        var outputDir: String?
-
-        var i = 0
-        while i < args.count {
-            let arg = args[i]
-            switch arg {
-            case "-o", "--output":
-                guard i + 1 < args.count else { fatal("Missing value for \(arg)") }
-                outputDir = args[i + 1]; i += 2
-            default:
-                if folder == nil { folder = arg } else { fatal("Unexpected: \(arg)") }
-                i += 1
-            }
-        }
-
-        guard let folder else { fatal("watch requires a folder path") }
-        let folderURL = URL(fileURLWithPath: folder)
-
-        let fm = FileManager.default
-        guard fm.fileExists(atPath: folder) else {
-            fatal("Folder does not exist: \(folder)")
-        }
-
-        FileHandle.standardError.write(Data("Watching \(folder)\n".utf8))
-
-        // Lightweight polling implementation (no DispatchSource events to
-        // keep this dependency-free). Fine for screenshot ingestion.
-        var seen = Set<String>(try! fm.contentsOfDirectory(atPath: folder))
-
-        while true {
-            Thread.sleep(forTimeInterval: 1.0)
-            guard let now = try? fm.contentsOfDirectory(atPath: folder) else { continue }
-            let nowSet = Set(now)
-            let added = nowSet.subtracting(seen)
-            seen = nowSet
-
-            for name in added where isImage(name) {
-                let imageURL = folderURL.appendingPathComponent(name)
-                // Wait briefly for the file to finish writing.
-                Thread.sleep(forTimeInterval: 0.4)
-
-                guard let cgImage = loadCGImage(from: imageURL) else { continue }
-                let detector = VisionControlDetector()
-                guard let result = try? detector.analyze(cgImage: cgImage) else { continue }
-
-                let payload = encodeJSON(
-                    result: result,
-                    sourcePath: imageURL.path,
-                    pretty: false
-                )
-
-                if let outputDir {
-                    let base = (name as NSString).deletingPathExtension
-                    let outURL = URL(fileURLWithPath: outputDir)
-                        .appendingPathComponent("\(base).json")
-                    try? payload.write(to: outURL, atomically: true, encoding: .utf8)
-                    FileHandle.standardError.write(Data("→ \(outURL.path)\n".utf8))
-                } else {
-                    print(payload)
-                }
-            }
-        }
-    }
-
-    // MARK: - Encoding
-
+    /// Default JSON shape — used by the GUI and one-off tooling.
     static func encodeJSON(
         result: AnalysisResult,
         sourcePath: String,
@@ -249,7 +345,6 @@ enum CLI {
                 let y: Double
             }
         }
-        
 
         let out = Out(
             source: sourcePath,
@@ -287,27 +382,156 @@ enum CLI {
         )
 
         let encoder = JSONEncoder()
-        if pretty {
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
-        } else {
-            encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-        }
+        encoder.outputFormatting = pretty
+            ? [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+            : [.sortedKeys, .withoutEscapingSlashes]
         let data = (try? encoder.encode(out)) ?? Data()
         return String(data: data, encoding: .utf8) ?? "{}"
     }
+
+    /// Compact convenience wrapper used by Server.swift.
     static func encodeAnalysisResultJSONCompact(
         result: AnalysisResult,
         sourcePath: String
     ) -> String {
         return encodeJSON(result: result, sourcePath: sourcePath, pretty: false)
     }
-    
+
+    /// Tart-shaped JSON consumed by packer-plugin-tart-uiautomate's `detect()`.
+    /// Matches the consumer's `Detection`/`Control`/`OCRItem`/`Rect`/`Screen`
+    /// types verbatim. Coordinates are PIXEL-space, origin top-left.
+    static func encodeTartJSON(
+        result: AnalysisResult,
+        sourcePath: String,
+        imageWidth: Int,
+        imageHeight: Int,
+        pretty: Bool
+    ) -> String {
+
+        struct Tart: Encodable {
+            struct Screen: Encodable {
+                let width: Int
+                let height: Int
+            }
+            struct Rect: Encodable {
+                let x: Int
+                let y: Int
+                let w: Int
+                let h: Int
+            }
+            struct Control: Encodable {
+                let role: String
+                let label: String
+                let value: String
+                let selected: Bool?
+                let enabled: Bool?
+                let bbox: Rect
+                let confidence: Double
+            }
+            struct OCR: Encodable {
+                let text: String
+                let bbox: Rect
+                let confidence: Double
+            }
+            let source: String
+            let screen: Screen
+            let scene: String?
+            let controls: [Control]
+            let ocr: [OCR]
+        }
+
+        // Normalized (origin bottom-left) → pixel (origin top-left).
+        func tartRect(from box: CGRect) -> Tart.Rect {
+            let px = Int((box.minX * CGFloat(imageWidth)).rounded())
+            let pw = Int((box.width * CGFloat(imageWidth)).rounded())
+            let ph = Int((box.height * CGFloat(imageHeight)).rounded())
+            let py = Int(((1.0 - box.minY - box.height) * CGFloat(imageHeight)).rounded())
+            return Tart.Rect(x: px, y: py, w: pw, h: ph)
+        }
+
+        // Extract scene tag from title: "[Country or Region] …" → "Country or Region"
+        var scene: String? = nil
+        if let t = result.summary.title,
+           t.hasPrefix("["),
+           let end = t.firstIndex(of: "]") {
+            scene = String(t[t.index(after: t.startIndex)..<end])
+        }
+
+        var controls: [Tart.Control] = []
+        var ocr: [Tart.OCR] = []
+
+        for d in result.detections {
+            let bbox = tartRect(from: d.boundingBox)
+            let role = mapKindToRole(d.kind)
+
+            switch d.kind {
+            case .text:
+                ocr.append(Tart.OCR(
+                    text: d.label ?? d.value,
+                    bbox: bbox,
+                    confidence: Double(d.confidence)
+                ))
+            default:
+                var selected: Bool? = nil
+                var enabled: Bool? = nil
+                switch d.kind {
+                case .button:
+                    enabled = (d.value != "disabled")
+                case .checkbox,
+                     .radioButton,
+                     .radioOption,
+                     .toggleSwitch:
+                    selected = (d.value == "selected")
+                default:
+                    break
+                }
+                controls.append(Tart.Control(
+                    role: role,
+                    label: d.label ?? "",
+                    value: d.value,
+                    selected: selected,
+                    enabled: enabled,
+                    bbox: bbox,
+                    confidence: Double(d.confidence)
+                ))
+            }
+        }
+
+        let out = Tart(
+            source: sourcePath,
+            screen: Tart.Screen(width: imageWidth, height: imageHeight),
+            scene: scene,
+            controls: controls,
+            ocr: ocr
+        )
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = pretty
+            ? [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+            : [.sortedKeys, .withoutEscapingSlashes]
+        let data = (try? encoder.encode(out)) ?? Data()
+        return String(data: data, encoding: .utf8) ?? "{}"
+    }
+
+    private static func mapKindToRole(_ kind: Detection.Kind) -> String {
+        switch kind {
+        case .button:       return "button"
+        case .checkbox:     return "checkbox"
+        case .radioButton:  return "radio"
+        case .radioOption:  return "option"
+        case .toggleSwitch: return "switch"
+        case .textField:    return "textfield"
+        case .text:         return "text"
+        case .unknown:      return "unknown"
+        }
+    }
+
     private static func encodeText(result: AnalysisResult, sourcePath: String) -> String {
         var lines: [String] = []
         lines.append("Source: \(sourcePath)")
-        if let t = result.summary.title { lines.append("Title: \(t)") }
+        if let t = result.summary.title    { lines.append("Title: \(t)") }
         if let s = result.summary.subtitle { lines.append("Subtitle: \(s)") }
-        if let p = result.summary.prompt { lines.append("Prompt: \(p)") }
+        if let p = result.summary.prompt   { lines.append("Prompt: \(p)") }
 
         if !result.summary.textFields.isEmpty {
             lines.append("Text Fields:")
@@ -315,14 +539,12 @@ enum CLI {
                 lines.append("  - \(f.label)\(f.focused ? " [focused]" : "")")
             }
         }
-
         if !result.summary.options.isEmpty {
             lines.append("Options:")
             for o in result.summary.options {
                 lines.append("  - \(o.text)\(o.selected ? " [selected]" : "")")
             }
         }
-
         if !result.summary.buttons.isEmpty {
             lines.append("Buttons:")
             for b in result.summary.buttons {
@@ -379,20 +601,194 @@ enum CLI {
         VisionControlScanner
 
         Usage:
-          VisionControlScanner analyze <image> [-o out.json] [--text] [--compact]
-          VisionControlScanner watch   <folder> [-o output-dir]
-          VisionControlScanner --help
+          vcs analyze <image> [-o out.json] [--text] [--compact]
+                              [--max-height N | --full-resolution]
+                              [--format default|tart]
+          vcs watch   <folder> [-o output-dir]
+                               [--max-height N | --full-resolution]
+                               [--format default|tart]
+          vcs serve   [--socket /tmp/vcs.sock] [--max-height N]
+          vcs --help
 
         analyze
           Analyze a single screenshot. Prints JSON to stdout unless -o is given.
-          --text     Emit a human-readable summary instead of JSON.
-          --compact  JSON on one line.
+          --text             Emit a human-readable summary instead of JSON.
+          --compact          JSON on one line.
+          --max-height N     Downscale to N pixels tall before analysis (default 720).
+          --full-resolution  Skip downscaling.
+          --format tart      Emit JSON shaped for packer-plugin-tart-uiautomate
+                             (pixel-space coords, top-left origin, scene field).
 
         watch
           Watch a folder for new image files and emit JSON for each.
-          With -o, writes <basename>.json into the output directory.
-          Without -o, prints each result to stdout.
+
+        serve
+          Long-lived scanner. Listens on a Unix socket; one JSON request per
+          line. `analyze` automatically delegates to this when VCS_SOCKET (or
+          /tmp/vcs.sock by default) exists. Set VCS_SOCKET="" to disable.
+          --socket <path>    Unix socket path (default /tmp/vcs.sock)
+          --max-height N     Default downscale height (default 720; 0 = full res)
         """
         FileHandle.standardError.write(Data((usage + "\n").utf8))
+    }
+}
+
+// MARK: - Server delegation client
+
+/// Lightweight Unix-socket client used by `vcs analyze` to delegate to a
+/// running `vcs serve`. On any failure (no socket, server error, decode
+/// failure, timeout) returns nil so the caller falls back to in-process mode.
+private enum ServerClient {
+
+    static func analyze(
+        socketPath: String,
+        imagePath: String,
+        maxHeight: Int?
+    ) -> AnalysisResult? {
+
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else { return nil }
+        defer { close(fd) }
+
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+
+        let ok: Bool = withUnsafeMutableBytes(of: &addr.sun_path) { buf in
+            let p = socketPath.utf8CString
+            guard p.count <= buf.count else { return false }
+            _ = p.withUnsafeBytes { src in
+                memcpy(buf.baseAddress!, src.baseAddress!, src.count)
+            }
+            return true
+        }
+        guard ok else { return nil }
+
+        let addrLen = socklen_t(MemoryLayout<sockaddr_un>.size)
+        let connectResult = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                Darwin.connect(fd, sa, addrLen)
+            }
+        }
+        guard connectResult == 0 else { return nil }
+
+        // 2s overall budget.
+        var tv = timeval(tv_sec: 2, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+
+        var req: [String: Any] = ["image": imagePath]
+        if let maxHeight { req["max_height"] = maxHeight }
+
+        guard let body = try? JSONSerialization.data(withJSONObject: req) else {
+            return nil
+        }
+        var line = body
+        line.append(0x0A)
+
+        let sent: Bool = line.withUnsafeBytes { buf in
+            var off = 0
+            while off < buf.count {
+                let n = write(fd, buf.baseAddress!.advanced(by: off), buf.count - off)
+                if n <= 0 { return false }
+                off += n
+            }
+            return true
+        }
+        guard sent else { return nil }
+
+        // Read up to one newline.
+        var resp = Data()
+        var scratch = [UInt8](repeating: 0, count: 8192)
+        while true {
+            let n = read(fd, &scratch, scratch.count)
+            if n <= 0 { break }
+            resp.append(scratch, count: n)
+            if resp.contains(0x0A) { break }
+        }
+        guard let nl = resp.firstIndex(of: 0x0A) else { return nil }
+        let payload = resp.subdata(in: resp.startIndex..<nl)
+
+        // Bail if the server reported an error.
+        if let obj = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],
+           obj["error"] != nil {
+            return nil
+        }
+
+        // The server returns the same shape as `encodeJSON` (default format).
+        // Decode it back into an AnalysisResult so the caller can re-encode in
+        // whichever output format the user requested.
+        return ServerClient.decode(payload: payload)
+    }
+
+    /// Decode the server's JSON back into an in-memory AnalysisResult.
+    /// Mirrors the encoder in `CLI.encodeJSON`.
+    private static func decode(payload: Data) -> AnalysisResult? {
+        struct Wire: Decodable {
+            let source: String?
+            let summary: Summary
+            let detections: [Det]
+
+            struct Summary: Decodable {
+                let title: String?
+                let subtitle: String?
+                let prompt: String?
+                let options: [Opt]
+                let buttons: [Btn]
+                let textFields: [Tfd]
+            }
+            struct Opt: Decodable { let text: String; let selected: Bool }
+            struct Btn: Decodable { let text: String; let enabled: Bool; let role: String }
+            struct Tfd: Decodable { let label: String; let focused: Bool }
+            struct Det: Decodable {
+                let kind: String
+                let label: String?
+                let value: String
+                let confidence: Float
+                let box: Box
+                let click: Pt?
+            }
+            struct Box: Decodable { let x, y, w, h: Double }
+            struct Pt:  Decodable { let x, y: Double }
+        }
+
+        guard let wire = try? JSONDecoder().decode(Wire.self, from: payload) else {
+            return nil
+        }
+
+        let detections: [Detection] = wire.detections.map { d in
+            let kind = Detection.Kind(rawValue: d.kind) ?? .unknown
+            let box = CGRect(x: d.box.x, y: d.box.y, width: d.box.w, height: d.box.h)
+            let click = d.click.map { CGPoint(x: $0.x, y: $0.y) }
+            return Detection(
+                kind: kind,
+                boundingBox: box,
+                controlCenter: click,
+                value: d.value,
+                confidence: d.confidence,
+                label: d.label
+            )
+        }
+
+        let options = wire.summary.options.map {
+            SetupOption(text: $0.text, selected: $0.selected)
+        }
+        let buttons = wire.summary.buttons.map { btn -> SetupButton in
+            let role = SetupButton.Role(rawValue: btn.role) ?? .secondary
+            return SetupButton(text: btn.text, enabled: btn.enabled, role: role)
+        }
+        let textFields = wire.summary.textFields.map {
+            SetupTextField(label: $0.label, focused: $0.focused)
+        }
+
+        let summary = SetupScreenSummary(
+            title: wire.summary.title,
+            subtitle: wire.summary.subtitle,
+            prompt: wire.summary.prompt,
+            options: options,
+            buttons: buttons,
+            textFields: textFields
+        )
+
+        return AnalysisResult(detections: detections, summary: summary)
     }
 }
