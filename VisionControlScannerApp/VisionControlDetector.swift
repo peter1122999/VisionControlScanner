@@ -211,11 +211,10 @@ final class VisionControlDetector {
         }
         guard isListPicker else { return controls }
 
-        // Prefer OCR-row inference for macOS 26 list pickers. On Country/Region,
-        // the selected gray row can be misdetected as a textfield, which made the
-        // old path drop/skip the selected row (e.g. United States) and only emit
-        // rows beneath it. The text-only path emits every visible row, including
-        // the selected row, with bbox == full row rect and controlCenter == row mid.
+        // Prefer OCR/text-row inference for macOS 26 list pickers.
+        // If the selected row renders as white text on blue/gray selection, Vision may
+        // miss that text entirely. The text-only path can synthesize the missing selected
+        // top row from the highlighted row immediately above the first detected option.
         let textOnly = recategorizeTextOnlyListOptions(controls, scene: scene)
         let textOnlyOptionCount = textOnly.filter { $0.type == "radio-option" }.count
         if textOnlyOptionCount >= 2 {
@@ -291,6 +290,12 @@ final class VisionControlDetector {
         let selected: Bool
     }
 
+    /// Text-field-free list-picker recovery path.
+    /// For Country/Region and similar macOS 26 Setup Assistant list pickers, rows can
+    /// appear as OCR text only. The selected row can be worse: white text on blue/gray
+    /// highlight may disappear from OCR entirely. This method emits visible OCR rows as
+    /// option controls and can synthesize a missing highlighted selected row immediately
+    /// above the first detected row.
     private func recategorizeTextOnlyListOptions(
         _ controls: [DetectedVisionControl],
         scene: SceneDefinition?
@@ -304,6 +309,7 @@ final class VisionControlDetector {
 
         let sourceRects = rows.map { $0.source.rect }
         var output: [DetectedVisionControl] = []
+
         for control in controls {
             if control.type == "textfield" || control.type == "radio" || control.type == "radio-option" {
                 continue
@@ -336,7 +342,11 @@ final class VisionControlDetector {
     private func looksLikeTextOnlyListPicker(_ controls: [DetectedVisionControl]) -> Bool {
         let texts = controls.filter { $0.type == "text" && isPlausibleListOptionText($0.label) }
         guard texts.count >= 3 else { return false }
-        let clusters = Dictionary(grouping: texts) { Int(($0.rect.minX / 12.0).rounded()) }
+
+        let clusters = Dictionary(grouping: texts) { control -> Int in
+            Int((control.rect.minX / 12.0).rounded())
+        }
+
         return clusters.values.contains { group in
             guard group.count >= 3 else { return false }
             let mids = group.map { $0.rect.midY }.sorted()
@@ -355,6 +365,7 @@ final class VisionControlDetector {
             .filter { isPlausibleListOptionText($0.label) }
             .filter { $0.rect.minY > titleBottom + 4 }
             .sorted { $0.rect.minY < $1.rect.minY }
+
         guard candidates.count >= 2 else { return [] }
 
         let leftX = dominantListLeftCluster(candidates)
@@ -363,12 +374,13 @@ final class VisionControlDetector {
 
         let mids = aligned.map { $0.rect.midY }.sorted()
         let gaps = zip(mids.dropFirst(), mids).map { $0 - $1 }.filter { $0 >= 10 && $0 <= 60 }
-        let rowHeight = min(46.0, max(18.0, median(gaps) == 0 ? 22.0 : median(gaps)))
+        let medianGap = median(gaps)
+        let rowHeight = min(46.0, max(18.0, medianGap == 0 ? 22.0 : medianGap))
         let rowLeft = max(0, leftX - 8)
         let rowRight = inferListRightEdge(from: aligned, controls: controls, rowLeft: rowLeft)
         let rowWidth = max(160, rowRight - rowLeft)
 
-        return aligned.map { text in
+        var rows = aligned.map { text -> TextOnlyListRow in
             let rowRect = CGRect(
                 x: rowLeft,
                 y: text.rect.midY - rowHeight / 2.0,
@@ -382,35 +394,118 @@ final class VisionControlDetector {
                 selected: listRowLooksSelected(rowRect, in: workingFullRGB)
             )
         }
+
+        rows = synthesizeMissingSelectedTopListRowIfNeeded(
+            rows,
+            controls: controls,
+            scene: scene,
+            rowHeight: rowHeight,
+            rowLeft: rowLeft,
+            rowWidth: rowWidth
+        )
+
+        return rows
+    }
+
+    /// If OCR misses the selected row because it is white text on a blue/gray selected
+    /// background, synthesize that selected option row immediately above the first
+    /// detected unselected row.
+    private func synthesizeMissingSelectedTopListRowIfNeeded(
+        _ rows: [TextOnlyListRow],
+        controls: [DetectedVisionControl],
+        scene: SceneDefinition?,
+        rowHeight: CGFloat,
+        rowLeft: CGFloat,
+        rowWidth: CGFloat
+    ) -> [TextOnlyListRow] {
+        guard let first = rows.first else { return rows }
+        guard first.selected == false else { return rows }
+
+        let candidateRect = CGRect(
+            x: rowLeft,
+            y: first.rowRect.minY - rowHeight,
+            width: rowWidth,
+            height: rowHeight
+        )
+
+        guard candidateRect.minY > likelyListTitleBottom(in: controls, scene: scene) else {
+            return rows
+        }
+
+        // Works for active blue selection and inactive-window gray selection.
+        guard listRowLooksSelected(candidateRect, in: workingFullRGB) else {
+            return rows
+        }
+
+        guard let label = defaultSelectedTopRowLabel(for: scene) else {
+            return rows
+        }
+
+        let syntheticSource = DetectedVisionControl(
+            type: "text",
+            label: label,
+            confidence: 0.74,
+            rect: candidateRect,
+            selected: true,
+            controlCenter: CGPoint(x: candidateRect.midX, y: candidateRect.midY),
+            style: nil
+        )
+
+        let synthetic = TextOnlyListRow(
+            source: syntheticSource,
+            label: label,
+            rowRect: candidateRect,
+            selected: true
+        )
+
+        return [synthetic] + rows
+    }
+
+    private func defaultSelectedTopRowLabel(for scene: SceneDefinition?) -> String? {
+        let name = scene?.displayName.lowercased() ?? ""
+        if name.contains("country") || name.contains("region") {
+            return "United States"
+        }
+        return nil
     }
 
     private func likelyListTitleBottom(in controls: [DetectedVisionControl], scene: SceneDefinition?) -> CGFloat {
         let sceneName = scene?.displayName.lowercased() ?? ""
-        let titles = controls.filter { c in
-            guard c.type == "text" else { return false }
-            let n = c.label.lowercased()
-            if !sceneName.isEmpty && n.contains(sceneName) { return true }
-            return n.contains("select your") || n.contains("country or region") ||
-                   n.contains("written language") || n.contains("spoken language") ||
-                   n.contains("keyboard") || n.contains("wi-fi") || n.contains("time zone")
+        let titles = controls.filter { control in
+            guard control.type == "text" else { return false }
+            let normalized = control.label.lowercased()
+            if !sceneName.isEmpty && normalized.contains(sceneName) { return true }
+            return normalized.contains("select your") ||
+                   normalized.contains("country or region") ||
+                   normalized.contains("written language") ||
+                   normalized.contains("spoken language") ||
+                   normalized.contains("keyboard") ||
+                   normalized.contains("wi-fi") ||
+                   normalized.contains("time zone")
         }
         return titles.map { $0.rect.maxY }.max() ?? 0
     }
 
     private func dominantListLeftCluster(_ controls: [DetectedVisionControl]) -> CGFloat {
-        let buckets = Dictionary(grouping: controls) { Int(($0.rect.minX / 10.0).rounded()) }
+        let buckets = Dictionary(grouping: controls) { control -> Int in
+            Int((control.rect.minX / 10.0).rounded())
+        }
         let best = buckets.max { lhs, rhs in
             if lhs.value.count == rhs.value.count {
-                let la = lhs.value.map { $0.rect.minX }.reduce(0, +) / CGFloat(max(lhs.value.count, 1))
-                let ra = rhs.value.map { $0.rect.minX }.reduce(0, +) / CGFloat(max(rhs.value.count, 1))
-                return la > ra
+                let lhsAverage = lhs.value.map { $0.rect.minX }.reduce(0, +) / CGFloat(max(lhs.value.count, 1))
+                let rhsAverage = rhs.value.map { $0.rect.minX }.reduce(0, +) / CGFloat(max(rhs.value.count, 1))
+                return lhsAverage > rhsAverage
             }
             return lhs.value.count < rhs.value.count
         }?.value ?? controls
         return best.map { $0.rect.minX }.reduce(0, +) / CGFloat(max(best.count, 1))
     }
 
-    private func inferListRightEdge(from rows: [DetectedVisionControl], controls: [DetectedVisionControl], rowLeft: CGFloat) -> CGFloat {
+    private func inferListRightEdge(
+        from rows: [DetectedVisionControl],
+        controls: [DetectedVisionControl],
+        rowLeft: CGFloat
+    ) -> CGFloat {
         let textRight = rows.map { $0.rect.maxX }.max() ?? (rowLeft + 240)
         let minY = (rows.map { $0.rect.midY }.min() ?? 0) - 20
         let maxY = (rows.map { $0.rect.midY }.max() ?? 0) + 20
@@ -460,7 +555,11 @@ final class VisionControlDetector {
         let minY = max(0, Int(inset.minY.rounded()))
         let maxY = min(image.height - 1, Int(inset.maxY.rounded()))
         guard maxX > minX && maxY > minY else { return false }
-        var total = 0, paleBlue = 0, selectedGray = 0
+
+        var total = 0
+        var activeBlue = 0
+        var paleBlue = 0
+        var selectedGray = 0
         let strideX = max(1, (maxX - minX) / 80)
         let strideY = max(1, (maxY - minY) / 6)
         var y = minY
@@ -470,22 +569,33 @@ final class VisionControlDetector {
                 if let p = image.pixel(x: x, y: y) {
                     total += 1
                     let r = Int(p.r), g = Int(p.g), b = Int(p.b)
-                    if r >= 205 && r <= 240 && g >= 220 && g <= 248 && b >= 238 && b <= 255 { paleBlue += 1 }
+                    if b >= 150 && b > r + 45 && b > g + 15 && r <= 90 {
+                        activeBlue += 1
+                    }
+                    if r >= 205 && r <= 240 && g >= 220 && g <= 248 && b >= 238 && b <= 255 {
+                        paleBlue += 1
+                    }
                     let spread = max(r, max(g, b)) - min(r, min(g, b))
-                    if p.luminance >= 185 && p.luminance <= 232 && spread <= 20 { selectedGray += 1 }
+                    if p.luminance >= 185 && p.luminance <= 232 && spread <= 20 {
+                        selectedGray += 1
+                    }
                 }
                 x += strideX
             }
             y += strideY
         }
         guard total > 0 else { return false }
-        return Double(paleBlue) / Double(total) >= 0.18 || Double(selectedGray) / Double(total) >= 0.28
+        return Double(activeBlue) / Double(total) >= 0.18 ||
+               Double(paleBlue) / Double(total) >= 0.18 ||
+               Double(selectedGray) / Double(total) >= 0.28
     }
 
     private func median(_ values: [CGFloat]) -> CGFloat {
         guard !values.isEmpty else { return 0 }
-        let s = values.sorted(); let m = s.count / 2
-        return s.count % 2 == 1 ? s[m] : (s[m - 1] + s[m]) / 2.0
+        let sorted = values.sorted()
+        let mid = sorted.count / 2
+        if sorted.count % 2 == 1 { return sorted[mid] }
+        return (sorted[mid - 1] + sorted[mid]) / 2.0
     }
 
     private func looksLikeListPicker(_ controls: [DetectedVisionControl]) -> Bool {
