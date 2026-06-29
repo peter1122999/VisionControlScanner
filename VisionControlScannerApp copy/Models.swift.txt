@@ -23,9 +23,6 @@ struct Detection: Identifiable, Hashable {
     let value: String
     let confidence: Float
     let label: String?
-    /// Optional render style for buttons — "primary" (filled blue) or
-    /// "secondary" (no fill, dark text). `nil` for non-buttons.
-    let style: String?
 }
 
 struct TextLabel: Hashable {
