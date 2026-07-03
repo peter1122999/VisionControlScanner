@@ -1,6 +1,7 @@
 import Foundation
 import AppKit
 import CoreGraphics
+import ImageIO
 import UniformTypeIdentifiers
 
 enum CLI {
@@ -8,6 +9,7 @@ enum CLI {
     /// start the SwiftUI app). Returns false if no CLI args were given.
     @discardableResult
     static func runIfNeeded() -> Bool {
+        if CLI.findCardRunIfNeeded(CommandLine.arguments) { return true }
         let args = CommandLine.arguments
         guard args.count > 1 else { return false }
         // Strip Xcode debugger noise.
@@ -264,7 +266,7 @@ enum CLI {
 
     // MARK: - Encoders
 
-    /// Default JSON shape — used by the GUI and one-off tooling.
+    /// Default JSON shape â used by the GUI and one-off tooling.
     static func encodeJSON(
         result: AnalysisResult,
         sourcePath: String,
@@ -385,6 +387,10 @@ enum CLI {
                 let w: Int
                 let h: Int
             }
+            struct Point: Encodable {
+                let x: Int
+                let y: Int
+            }
             struct Control: Encodable {
                 let role: String
                 let label: String
@@ -393,6 +399,8 @@ enum CLI {
                 let enabled: Bool?
                 let style: String?
                 let bbox: Rect
+                let controlCenter: Point?
+                let click: Point?
                 let confidence: Double
             }
             struct OCR: Encodable {
@@ -412,6 +420,12 @@ enum CLI {
             let ph = Int((box.height * CGFloat(imageHeight)).rounded())
             let py = Int(((1.0 - box.minY - box.height) * CGFloat(imageHeight)).rounded())
             return Tart.Rect(x: px, y: py, w: pw, h: ph)
+        }
+        func tartPoint(from point: CGPoint?) -> Tart.Point? {
+            guard let point else { return nil }
+            let px = Int((point.x * CGFloat(imageWidth)).rounded())
+            let py = Int(((1.0 - point.y) * CGFloat(imageHeight)).rounded())
+            return Tart.Point(x: px, y: py)
         }
         var scene: String? = nil
         if let t = result.summary.title,
@@ -445,6 +459,7 @@ enum CLI {
                 default:
                     break
                 }
+                let clickPoint = tartPoint(from: d.controlCenter)
                 controls.append(Tart.Control(
                     role: role,
                     label: d.label ?? "",
@@ -453,6 +468,8 @@ enum CLI {
                     enabled: enabled,
                     style: d.style,
                     bbox: bbox,
+                    controlCenter: clickPoint,
+                    click: clickPoint,
                     confidence: Double(d.confidence)
                 ))
             }
@@ -478,9 +495,12 @@ enum CLI {
         case .checkbox:     return "checkbox"
         case .radioButton:  return "radio"
         case .radioOption:  return "option"
+        case .menuItem:     return "menuitem"
         case .toggleSwitch: return "switch"
         case .textField:    return "textfield"
         case .text:         return "text"
+        case .menuBarItem:  return "menubar"
+        case .dockItem:     return "dock"
         case .unknown:      return "unknown"
         }
     }
@@ -526,9 +546,16 @@ enum CLI {
     // MARK: - Helpers
 
     private static func loadCGImage(from url: URL) -> CGImage? {
-        guard let image = NSImage(contentsOf: url) else { return nil }
-        var rect = CGRect(origin: .zero, size: image.size)
-        return image.cgImage(forProposedRect: &rect, context: nil, hints: nil)
+        // Use CGImageSource directly to get the full pixel-resolution image.
+        // Going through NSImage + cgImage(forProposedRect:) interprets DPI
+        // metadata, which on Retina displays halves the pixel dimensions
+        // (e.g. a 1024×768 capture at 144 DPI becomes 512×384).  That
+        // causes encodeTartJSON to emit coordinates at half scale.
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+            return nil
+        }
+        return image
     }
 
     private static func isImage(_ name: String) -> Bool {

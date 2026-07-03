@@ -5,10 +5,13 @@ enum AccessibilityScene {
         identifier: "accessibility",
         displayName: "Accessibility",
         matchKeywords: [
-            "accessibility features adapt",
-            "see what's available in each of the categories"
+            "accessibility",
+            "vision",
+            "motor",
+            "hearing",
+            "cognitive"
         ],
         layout: .infoCardGrid,
-        promoteToButtons: ["vision", "motor", "hearing", "cognitive"]
+        promoteToButtons: ["not now", "continue"]
     )
 }

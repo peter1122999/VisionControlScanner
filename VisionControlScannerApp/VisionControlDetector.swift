@@ -19,12 +19,20 @@ struct DetectedVisionControl {
     let style: String?
 }
 
+// MARK: - Debug logging (set VCS_DEBUG=1; temporary instrumentation)
+
+func vcsDebug(_ message: @autoclosure () -> String) {
+    guard ProcessInfo.processInfo.environment["VCS_DEBUG"] != nil else { return }
+    FileHandle.standardError.write(Data("[vcs-debug] \(message())\n".utf8))
+}
+
 // MARK: - Public detector
 
 final class VisionControlDetector {
 
     private var workingFullRGB: RGBImage?
 
+    private var workingFullCGImage: CGImage?
     func analyze(
         cgImage: CGImage,
         maxHeight: Int? = nil
@@ -36,7 +44,11 @@ final class VisionControlDetector {
             workingFullImage = cgImage
         }
         self.workingFullRGB = makeRGBImage(from: workingFullImage)
-        defer { self.workingFullRGB = nil }
+        self.workingFullCGImage = workingFullImage
+        defer {
+            self.workingFullRGB = nil
+            self.workingFullCGImage = nil
+        }
 
         let roi = findSetupCard(in: workingFullImage)
             ?? safetyROI(for: workingFullImage)
@@ -66,13 +78,19 @@ final class VisionControlDetector {
 
         let filtered = applySceneFilter(restructured, scene: scene)
         let stamped = applyTextFieldSelectors(filtered, scene: scene)
+        let withHelloButton = promoteHelloBottomCenterButton(
+            stamped,
+            scene: scene,
+            imageWidth: CGFloat(workingFullImage.width),
+            imageHeight: CGFloat(workingFullImage.height)
+        )
 
         let imageWidth = CGFloat(workingFullImage.width)
         let imageHeight = CGFloat(workingFullImage.height)
-        let detections = stamped.map {
+        let detections = withHelloButton.map {
             mapToDetection($0, imageWidth: imageWidth, imageHeight: imageHeight)
         }
-        let summary = buildSummary(controls: stamped, scene: scene)
+        let summary = buildSummary(controls: withHelloButton, scene: scene)
         return AnalysisResult(detections: detections, summary: summary)
     }
 
@@ -185,12 +203,19 @@ final class VisionControlDetector {
     // MARK: - Stage 4a: Scene classification
 
     private func classifyScene(controls: [DetectedVisionControl]) -> SceneDefinition? {
+        // Checkbox/toggle labels must be part of the haystack: mergeControls
+        // consumes the OCR text line INTO the control, so on screens whose only
+        // distinctive phrase is a checkbox label ("Enable Ask Siri"), excluding
+        // them left nothing for the keywords to match and the scene came back
+        // nil — wait_for_scene "Siri" then timed out.
         let haystack = controls
             .filter {
                 $0.type == "text" ||
                 $0.type == "button" ||
                 $0.type == "radio-option" ||
-                $0.type == "textfield"
+                $0.type == "textfield" ||
+                $0.type == "checkbox" ||
+                $0.type == "toggle"
             }
             .map { $0.label.lowercased() }
             .joined(separator: " | ")
@@ -211,12 +236,20 @@ final class VisionControlDetector {
         }
         guard isListPicker else { return controls }
 
+        // Chevron nav rows (Age Range) already arrive as pixel-anchored options
+        // with correct row bands; re-inferring rows from OCR text would replace
+        // them with worse guesses (merged title/subtitle bands, dropped rows).
+        if controls.filter({ $0.type == "radio-option" }).count >= 2 {
+            return controls
+        }
+
         // Prefer OCR/text-row inference for macOS 26 list pickers.
         // If the selected row renders as white text on blue/gray selection, Vision may
         // miss that text entirely. The text-only path can synthesize the missing selected
         // top row from the highlighted row immediately above the first detected option.
         let textOnly = recategorizeTextOnlyListOptions(controls, scene: scene)
         let textOnlyOptionCount = textOnly.filter { $0.type == "radio-option" }.count
+        vcsDebug("listOptions in=\(controls.count) (options=\(controls.filter { $0.type == "radio-option" }.count)) textOnly=\(textOnly.count) textOnlyOptions=\(textOnlyOptionCount)")
         if textOnlyOptionCount >= 2 {
             return textOnly
         }
@@ -363,27 +396,44 @@ final class VisionControlDetector {
         let candidates = controls
             .filter { $0.type == "text" }
             .filter { isPlausibleListOptionText($0.label) }
+            .filter { !isBodyCopyListLeak($0, allControls: controls) }
             .filter { $0.rect.minY > titleBottom + 4 }
             .sorted { $0.rect.minY < $1.rect.minY }
 
         guard candidates.count >= 2 else { return [] }
 
         let leftX = dominantListLeftCluster(candidates)
-        let aligned = candidates.filter { abs($0.rect.minX - leftX) <= 20 }
+        let aligned = candidates.filter { abs($0.rect.minX - leftX) <= 30 }
         guard aligned.count >= 2 else { return [] }
 
         let mids = aligned.map { $0.rect.midY }.sorted()
         let gaps = zip(mids.dropFirst(), mids).map { $0 - $1 }.filter { $0 >= 10 && $0 <= 60 }
         let medianGap = median(gaps)
-        let rowHeight = min(46.0, max(18.0, medianGap == 0 ? 22.0 : medianGap))
-        let rowLeft = max(0, leftX - 8)
+        // FIX (BUG 3): row height used to equal the row *pitch*, so rects touched and
+        // any mid-Y drift put the bbox on the neighboring row. Cap to ~72% of pitch.
+        let pitch = medianGap == 0 ? 22.0 : medianGap
+        let textHeights = aligned.map { $0.rect.height }.sorted()
+        let medianTextH = textHeights.isEmpty ? 18.0 : textHeights[textHeights.count / 2]
+        let rowHeight = max(16.0, min(pitch * 0.72, medianTextH * 1.35))
+        // FIX (BUG 2): classifyTextControls already inset text rects by dx:-12.
+        // Subtracting another 8 put rowLeft ~20 px left of the visible text and
+        // ~150 px left of the visible (centered) list column. Add 12 back + 4 pad.
+        let visibleLeftX = leftX + 12
+        let rowLeft = max(0, visibleLeftX - 4)
         let rowRight = inferListRightEdge(from: aligned, controls: controls, rowLeft: rowLeft)
         let rowWidth = max(160, rowRight - rowLeft)
 
+        // FIX: snap each row's Y to a rigid pitch grid anchored on
+        // the first aligned row. Raw OCR midY drifts by 3-10 px per
+        // row due to accent/descender variance, which stacks up.
+        let anchorMidY = aligned.first?.rect.midY ?? 0
         var rows = aligned.map { text -> TextOnlyListRow in
+            let rawOffset = text.rect.midY - anchorMidY
+            let snappedIndex = (rawOffset / pitch).rounded()
+            let snappedMidY = anchorMidY + snappedIndex * pitch
             let rowRect = CGRect(
                 x: rowLeft,
-                y: text.rect.midY - rowHeight / 2.0,
+                y: snappedMidY - rowHeight / 2.0,
                 width: rowWidth,
                 height: rowHeight
             )
@@ -395,21 +445,88 @@ final class VisionControlDetector {
             )
         }
 
-        rows = synthesizeMissingSelectedTopListRowIfNeeded(
+        rows = insertMissingSelectedListRowIfFound(
             rows,
-            controls: controls,
-            scene: scene,
+            pitch: pitch,
             rowHeight: rowHeight,
             rowLeft: rowLeft,
             rowWidth: rowWidth
         )
 
+        // Legacy top-row fallback only when the grid scan found nothing: its
+        // pale-blue/fill heuristics can mistake the list's focus ring for a
+        // selection (fabricated a selected "Tristan da Cunha" on the Country
+        // screen while the real selection sat at the bottom of the list).
+        if !rows.contains(where: { $0.selected }) {
+            rows = synthesizeMissingSelectedTopListRowIfNeeded(
+                rows,
+                controls: controls,
+                scene: scene,
+                rowHeight: rowHeight,
+                rowLeft: rowLeft,
+                rowWidth: rowWidth
+            )
+        }
+
         return rows
     }
 
-    /// If OCR misses the selected row because it is white text on a blue/gray selected
-    /// background, synthesize that selected option row immediately above the first
-    /// detected unselected row.
+    /// The selected list row renders white-on-saturated-blue, which the primary
+    /// OCR pass usually drops, so it is missing from `rows` — and it can be ANY
+    /// row, not just the one above the first OCR hit: type-select leaves it at
+    /// the bottom (Country → "United States"), and scrolling can leave it mid-list.
+    /// Scan the pitch grid from one row above the first OCR row to one row below
+    /// the last, including interior gaps, for a saturated-blue band with white
+    /// text; OCR it contrast-inverted and insert it as the selected option.
+    private func insertMissingSelectedListRowIfFound(
+        _ rows: [TextOnlyListRow],
+        pitch: CGFloat,
+        rowHeight: CGFloat,
+        rowLeft: CGFloat,
+        rowWidth: CGFloat
+    ) -> [TextOnlyListRow] {
+        guard let first = rows.first, let last = rows.last, pitch > 8 else { return rows }
+        guard !rows.contains(where: { $0.selected }) else { return rows }
+
+        var midY = first.rowRect.midY - pitch
+        let endMidY = last.rowRect.midY + pitch
+        while midY <= endMidY + 0.5 {
+            defer { midY += pitch }
+            if rows.contains(where: { abs($0.rowRect.midY - midY) < pitch * 0.5 }) {
+                continue
+            }
+            let band = CGRect(
+                x: rowLeft,
+                y: midY - rowHeight / 2.0,
+                width: rowWidth,
+                height: rowHeight
+            )
+            let appearance = listRowSelectionAppearance(band, in: workingFullRGB)
+            vcsDebug("selScan band=\(band) satBlue=\(appearance.isSaturatedBlue) white=\(appearance.hasWhiteText)")
+            guard appearance.isSaturatedBlue, appearance.hasWhiteText else { continue }
+            let ocr = ocrSelectedListRowWhiteText(band)
+            vcsDebug("selScan OCR=\(ocr ?? "nil")")
+            guard let label = ocr,
+                  !label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else { continue }
+            let source = DetectedVisionControl(
+                type: "text",
+                label: label,
+                confidence: 0.95,
+                rect: band,
+                selected: true,
+                controlCenter: CGPoint(x: band.midX, y: band.midY),
+                style: nil
+            )
+            let inserted = TextOnlyListRow(
+                source: source, label: label, rowRect: band, selected: true
+            )
+            return (rows + [inserted]).sorted { $0.rowRect.minY < $1.rowRect.minY }
+        }
+        return rows
+    }
+
+
     private func synthesizeMissingSelectedTopListRowIfNeeded(
         _ rows: [TextOnlyListRow],
         controls: [DetectedVisionControl],
@@ -421,51 +538,275 @@ final class VisionControlDetector {
         guard let first = rows.first else { return rows }
         guard first.selected == false else { return rows }
 
-        let candidateRect = CGRect(
-            x: rowLeft,
-            y: first.rowRect.minY - rowHeight,
-            width: rowWidth,
-            height: rowHeight
+        let titleBottom = likelyListTitleBottom(in: controls, scene: scene)
+        guard let label = defaultSelectedTopRowLabel(for: scene),
+              !label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            return rows
+        }
+
+        // IMPORTANT:
+        // Do not attach the synthetic "English" label to the extrapolated OCR row.
+        // First find the actual saturated-blue/pale-blue selected-row fill, then
+        // use that highlight rectangle as the option bbox.
+        let highlightedRect = selectedTopListRowHighlightRect(
+            above: first.rowRect,
+            rowHeight: rowHeight,
+            rowLeft: rowLeft,
+            rowWidth: rowWidth,
+            controls: controls,
+            scene: scene
         )
 
-        guard candidateRect.minY > likelyListTitleBottom(in: controls, scene: scene) else {
-            return rows
-        }
+        let fallbackWidth = min(max(rowWidth, 210), 280)
+        let fallbackX = max(0, rowLeft - min(110, fallbackWidth * 0.45))
+        let fallbackRect = CGRect(
+            x: fallbackX,
+            y: first.rowRect.minY - rowHeight,
+            width: fallbackWidth,
+            height: min(max(rowHeight, 22), 32)
+        )
 
-        // Works for active blue selection and inactive-window gray selection.
-        guard listRowLooksSelected(candidateRect, in: workingFullRGB) else {
-            return rows
-        }
+        let candidateRect = highlightedRect ?? fallbackRect
 
-        guard let label = defaultSelectedTopRowLabel(for: scene) else {
-            return rows
+        guard candidateRect.minY > titleBottom else { return rows }
+
+        // Require a real visual selected-row signal. This prevents the known-default
+        // path from inventing "English" at the wrong y-coordinate.
+        let looksSelected =
+            highlightedRect != nil ||
+            listRowLooksSelected(candidateRect, in: workingFullRGB) ||
+            selectedTopListRowFillLooksPresent(candidateRect, in: workingFullRGB)
+
+        guard looksSelected else { return rows }
+
+        // Prefer the label actually rendered on the selected row. That row is white text
+        // on a saturated-blue/gray highlight, which the primary Vision OCR pass normally
+        // drops entirely. ocrSelectedListRowWhiteText re-runs OCR on a contrast-inverted
+        // crop of just this rect (makeDarkerTextOCRImage). Only fall back to the per-scene
+        // default label if that targeted OCR yields nothing usable. This is strictly
+        // additive: when OCR fails, behavior matches the previous hardcoded-label path.
+        let resolvedLabel: String
+        if let ocrLabel = ocrSelectedListRowWhiteText(candidateRect),
+           !ocrLabel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            resolvedLabel = ocrLabel
+        } else {
+            resolvedLabel = label
         }
 
         let syntheticSource = DetectedVisionControl(
             type: "text",
-            label: label,
-            confidence: 0.74,
+            label: resolvedLabel,
+            confidence: highlightedRect != nil ? 0.96 : 0.88,
             rect: candidateRect,
             selected: true,
             controlCenter: CGPoint(x: candidateRect.midX, y: candidateRect.midY),
             style: nil
         )
 
-        let synthetic = TextOnlyListRow(
-            source: syntheticSource,
-            label: label,
-            rowRect: candidateRect,
-            selected: true
+        return [TextOnlyListRow(source: syntheticSource, label: resolvedLabel, rowRect: candidateRect, selected: true)] + rows
+    }
+
+
+    private func selectedTopListRowFillLooksPresent(_ rect: CGRect, in image: RGBImage?) -> Bool {
+        guard let image else { return false }
+
+        // Wider than the OCR text row. The inferred row may start at text-left,
+        // while the real blue rounded selection starts farther left and ends
+        // before the scrollbar. Expanding both directions catches the fill.
+        let sample = rect.insetBy(dx: -42, dy: -4)
+
+        let minX = max(0, Int(sample.minX.rounded()))
+        let maxX = min(image.width - 1, Int(sample.maxX.rounded()))
+        let minY = max(0, Int(sample.minY.rounded()))
+        let maxY = min(image.height - 1, Int(sample.maxY.rounded()))
+
+        guard maxX > minX && maxY > minY else { return false }
+
+        var total = 0
+        var saturatedBlue = 0
+        var paleBlue = 0
+        var selectedGray = 0
+        var whiteText = 0
+
+        let strideX = max(1, (maxX - minX) / 140)
+        let strideY = max(1, (maxY - minY) / 14)
+
+        var y = minY
+        while y <= maxY {
+            var x = minX
+            while x <= maxX {
+                if let p = image.pixel(x: x, y: y) {
+                    total += 1
+
+                    let r = Int(p.r)
+                    let g = Int(p.g)
+                    let b = Int(p.b)
+                    let spread = max(r, max(g, b)) - min(r, min(g, b))
+
+                    // Existing pale selected row.
+                    if r >= 205 && r <= 240 &&
+                       g >= 220 && g <= 248 &&
+                       b >= 238 && b <= 255 {
+                        paleBlue += 1
+                    }
+
+                    // macOS saturated selected row, around RGB 0,122,255.
+                    if r <= 50 &&
+                       g >= 100 && g <= 140 &&
+                       b >= 240 {
+                        saturatedBlue += 1
+                    }
+
+                    // Inactive-window gray selected row.
+                    if p.luminance >= 185 && p.luminance <= 232 && spread <= 22 {
+                        selectedGray += 1
+                    }
+
+                    // White glyphs on selected blue.
+                    if r >= 235 && g >= 235 && b >= 235 && spread <= 24 {
+                        whiteText += 1
+                    }
+                }
+                x += strideX
+            }
+            y += strideY
+        }
+
+        guard total > 0 else { return false }
+
+        let saturatedBlueRatio = Double(saturatedBlue) / Double(total)
+        let paleBlueRatio = Double(paleBlue) / Double(total)
+        let selectedGrayRatio = Double(selectedGray) / Double(total)
+        let whiteTextRatio = Double(whiteText) / Double(total)
+
+        return
+            paleBlueRatio >= 0.08 ||
+            selectedGrayRatio >= 0.20 ||
+            (saturatedBlueRatio >= 0.08 && whiteTextRatio >= 0.002)
+    }
+
+
+
+    private func selectedTopListRowHighlightRect(
+        above firstRowRect: CGRect,
+        rowHeight: CGFloat,
+        rowLeft: CGFloat,
+        rowWidth: CGFloat,
+        controls: [DetectedVisionControl],
+        scene: SceneDefinition?
+    ) -> CGRect? {
+        guard let image = workingFullRGB else { return nil }
+
+        let titleBottom = likelyListTitleBottom(in: controls, scene: scene)
+
+        // Search between the title and the first OCR-visible row. This avoids the
+        // globe/icon blue above the title and avoids rows below the selected row.
+        let searchTop = max(0, Int((titleBottom + 2).rounded(.down)))
+        let searchBottom = min(
+            image.height - 1,
+            Int((firstRowRect.minY + max(rowHeight * 0.35, 8)).rounded(.up))
         )
 
-        return [synthetic] + rows
+        // rowLeft is usually OCR text-left, not list-left. Expand left enough to
+        // include the actual blue rounded rectangle. Cap right so scrollbar/globe
+        // junk cannot stretch the bbox to ~397px again.
+        let searchLeft = max(0, Int((rowLeft - max(95, rowHeight * 4.5)).rounded(.down)))
+        let searchRight = min(
+            image.width - 1,
+            Int((rowLeft + min(max(rowWidth, 240), 360)).rounded(.up))
+        )
+
+        guard searchBottom > searchTop, searchRight > searchLeft else { return nil }
+
+        var found = false
+        var minBlueX = image.width
+        var maxBlueX = 0
+        var minBlueY = image.height
+        var maxBlueY = 0
+
+        var y = searchTop
+        while y <= searchBottom {
+            var x = searchLeft
+            while x <= searchRight {
+                if let p = image.pixel(x: x, y: y) {
+                    let r = Int(p.r)
+                    let g = Int(p.g)
+                    let b = Int(p.b)
+
+                    let saturatedBlue =
+                        r <= 70 &&
+                        g >= 90 && g <= 165 &&
+                        b >= 205 &&
+                        b > r + 120 &&
+                        b > g + 70
+
+                    let paleBlue =
+                        r >= 205 && r <= 245 &&
+                        g >= 220 && g <= 252 &&
+                        b >= 235 && b <= 255
+
+                    if saturatedBlue || paleBlue {
+                        found = true
+                        if x < minBlueX { minBlueX = x }
+                        if x > maxBlueX { maxBlueX = x }
+                        if y < minBlueY { minBlueY = y }
+                        if y > maxBlueY { maxBlueY = y }
+                    }
+                }
+                x += 1
+            }
+            y += 1
+        }
+
+        guard found else { return nil }
+
+        let rawWidth = maxBlueX - minBlueX + 1
+        let rawHeight = maxBlueY - minBlueY + 1
+
+        // Reject tiny glyph/icon fragments and over-wide accidental captures.
+        guard rawWidth >= 90,
+              rawWidth <= 320,
+              rawHeight >= 8,
+              rawHeight <= Int(max(rowHeight * 2.0, 44))
+        else {
+            return nil
+        }
+
+        let targetHeight = min(max(CGFloat(rawHeight), max(rowHeight, 22)), 34)
+        let centerY = (CGFloat(minBlueY) + CGFloat(maxBlueY)) / 2.0
+        let y0 = max(titleBottom + 1, centerY - targetHeight / 2.0)
+
+        return CGRect(
+            x: CGFloat(minBlueX),
+            y: y0,
+            width: CGFloat(rawWidth),
+            height: targetHeight
+        )
     }
+
+
+
 
     private func defaultSelectedTopRowLabel(for scene: SceneDefinition?) -> String? {
         let name = scene?.displayName.lowercased() ?? ""
+
+        if name.contains("language") && !name.contains("written") && !name.contains("spoken") {
+            return "English"
+        }
+
         if name.contains("country") || name.contains("region") {
             return "United States"
         }
+
+        if name.contains("written language") {
+            return "English"
+        }
+
+        if name.contains("spoken language") {
+            return "English"
+        }
+
         return nil
     }
 
@@ -475,21 +816,15 @@ final class VisionControlDetector {
             guard control.type == "text" else { return false }
             let normalized = control.label.lowercased()
             if !sceneName.isEmpty && normalized.contains(sceneName) { return true }
-            return normalized.contains("select your") ||
-                   normalized.contains("country or region") ||
-                   normalized.contains("written language") ||
-                   normalized.contains("spoken language") ||
-                   normalized.contains("keyboard") ||
-                   normalized.contains("wi-fi") ||
-                   normalized.contains("time zone")
+            return normalized.contains("select your") || normalized.contains("country or region") ||
+                   normalized.contains("written language") || normalized.contains("spoken language") ||
+                   normalized.contains("keyboard") || normalized.contains("wi-fi") || normalized.contains("time zone")
         }
         return titles.map { $0.rect.maxY }.max() ?? 0
     }
 
     private func dominantListLeftCluster(_ controls: [DetectedVisionControl]) -> CGFloat {
-        let buckets = Dictionary(grouping: controls) { control -> Int in
-            Int((control.rect.minX / 10.0).rounded())
-        }
+        let buckets = Dictionary(grouping: controls) { control -> Int in Int((control.rect.minX / 10.0).rounded()) }
         let best = buckets.max { lhs, rhs in
             if lhs.value.count == rhs.value.count {
                 let lhsAverage = lhs.value.map { $0.rect.minX }.reduce(0, +) / CGFloat(max(lhs.value.count, 1))
@@ -501,20 +836,16 @@ final class VisionControlDetector {
         return best.map { $0.rect.minX }.reduce(0, +) / CGFloat(max(best.count, 1))
     }
 
-    private func inferListRightEdge(
-        from rows: [DetectedVisionControl],
-        controls: [DetectedVisionControl],
-        rowLeft: CGFloat
-    ) -> CGFloat {
+    private func inferListRightEdge(from rows: [DetectedVisionControl], controls: [DetectedVisionControl], rowLeft: CGFloat) -> CGFloat {
+        // FIX (BUG 1): The old version considered EVERY control on the row Y band,
+        // so the chevron "Next" button pushed the column to the card's right edge.
+        // Anchor purely to the text extents + a scrollbar gutter, clamped to a
+        // max column width (largest observed SA list column at 1280x800).
         let textRight = rows.map { $0.rect.maxX }.max() ?? (rowLeft + 240)
-        let minY = (rows.map { $0.rect.midY }.min() ?? 0) - 20
-        let maxY = (rows.map { $0.rect.midY }.max() ?? 0) + 20
-        let right = controls
-            .filter { $0.rect.midY >= minY && $0.rect.midY <= maxY }
-            .map { $0.rect.maxX }
-            .filter { $0 > textRight + 20 }
-            .max()
-        return max(right ?? (textRight + 260), textRight + 140)
+        let scrollbarGutter: CGFloat = 24
+        let maxColumnWidth: CGFloat = 340
+        let cappedRight = min(textRight + scrollbarGutter, rowLeft + maxColumnWidth)
+        return max(cappedRight, textRight + 8)
     }
 
     private func isPlausibleListOptionText(_ raw: String) -> Bool {
@@ -528,9 +859,12 @@ final class VisionControlDetector {
         if rejectExact.contains(lowered) { return false }
         let rejectFragments = [
             "press the escape key", "command-option-f5", "voiceover", "accessibility options",
-            "create a mac account", "password", "terms and conditions"
+            "create a mac account", "password", "terms and conditions",
+            "customize", "you can", "your mac will", "tap to", "click to", "select to"
         ]
         if rejectFragments.contains(where: { lowered.contains($0) }) { return false }
+        if startsWithLowercaseLetter(text) { return false }
+        if containsWrappedSentencePunctuation(text) { return false }
         let scalars = text.unicodeScalars
         let letters = scalars.filter { CharacterSet.letters.contains($0) }.count
         let visible = scalars.filter { !$0.properties.isWhitespace }.count
@@ -538,64 +872,329 @@ final class VisionControlDetector {
         return Double(letters) / Double(visible) >= 0.45
     }
 
+    private func isBodyCopyListLeak(_ control: DetectedVisionControl, allControls: [DetectedVisionControl]) -> Bool {
+        let text = cleanListOptionLabel(control.label)
+        let normalized = text.lowercased()
+        if ["customize", "you can", "your mac will", "tap to", "click to", "select to"].contains(where: { normalized.contains($0) }) {
+            return true
+        }
+        if startsWithLowercaseLetter(text) { return true }
+        if containsWrappedSentencePunctuation(text) { return true }
+
+        let cardWidth = likelyContentWidth(from: allControls)
+        if cardWidth > 0, control.rect.width > cardWidth * 0.60 {
+            let expectedPitch: CGFloat = 44
+            let hasPeerBelow = allControls.contains { other in
+                guard other.type == "text", other.rect != control.rect else { return false }
+                guard isPlausibleListOptionText(other.label) else { return false }
+                return abs(other.rect.minX - control.rect.minX) <= 20 &&
+                       abs((other.rect.midY - control.rect.midY) - expectedPitch) <= 12
+            }
+            if !hasPeerBelow { return true }
+        }
+        return false
+    }
+
+    private func startsWithLowercaseLetter(_ text: String) -> Bool {
+        guard let scalar = text.trimmingCharacters(in: .whitespacesAndNewlines).unicodeScalars.first else { return false }
+        return CharacterSet.lowercaseLetters.contains(scalar)
+    }
+
+    private func containsWrappedSentencePunctuation(_ text: String) -> Bool {
+        text.range(of: #"[a-z][.!?]\s+[a-z]"#, options: [.regularExpression]) != nil
+    }
+
+    private func likelyContentWidth(from controls: [DetectedVisionControl]) -> CGFloat {
+        let rects = controls.map { $0.rect }
+        guard let minX = rects.map({ $0.minX }).min(), let maxX = rects.map({ $0.maxX }).max() else { return 0 }
+        return maxX - minX
+    }
+
     private func cleanListOptionLabel(_ raw: String) -> String {
         raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: "⌄", with: "")
-            .replacingOccurrences(of: "▾", with: "")
-            .replacingOccurrences(of: "›", with: "")
-            .replacingOccurrences(of: "ˇ", with: "")
+            .replacingOccurrences(of: "â", with: "")
+            .replacingOccurrences(of: "â¾", with: "")
+            .replacingOccurrences(of: "âº", with: "")
+            .replacingOccurrences(of: "Ë", with: "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private struct ListRowSelectionAppearance {
+        let isSelected: Bool
+        let isPaleBlue: Bool
+        let isSaturatedBlue: Bool
+        let isSelectedGray: Bool
+        let hasWhiteText: Bool
+    }
+
     private func listRowLooksSelected(_ rect: CGRect, in image: RGBImage?) -> Bool {
-        guard let image else { return false }
+        listRowSelectionAppearance(rect, in: image).isSelected
+    }
+
+    private func listRowSelectionAppearance(_ rect: CGRect, in image: RGBImage?) -> ListRowSelectionAppearance {
+        guard let image else {
+            return ListRowSelectionAppearance(
+                isSelected: false,
+                isPaleBlue: false,
+                isSaturatedBlue: false,
+                isSelectedGray: false,
+                hasWhiteText: false
+            )
+        }
+
         let inset = rect.insetBy(dx: 3, dy: 2)
         let minX = max(0, Int(inset.minX.rounded()))
         let maxX = min(image.width - 1, Int(inset.maxX.rounded()))
         let minY = max(0, Int(inset.minY.rounded()))
         let maxY = min(image.height - 1, Int(inset.maxY.rounded()))
-        guard maxX > minX && maxY > minY else { return false }
+
+        guard maxX > minX && maxY > minY else {
+            return ListRowSelectionAppearance(
+                isSelected: false,
+                isPaleBlue: false,
+                isSaturatedBlue: false,
+                isSelectedGray: false,
+                hasWhiteText: false
+            )
+        }
 
         var total = 0
-        var activeBlue = 0
+        var saturatedBlue = 0
         var paleBlue = 0
         var selectedGray = 0
-        let strideX = max(1, (maxX - minX) / 80)
-        let strideY = max(1, (maxY - minY) / 6)
+        var whiteText = 0
+
+        let strideX = max(1, (maxX - minX) / 100)
+        let strideY = max(1, (maxY - minY) / 10)
+
         var y = minY
         while y <= maxY {
             var x = minX
             while x <= maxX {
                 if let p = image.pixel(x: x, y: y) {
                     total += 1
-                    let r = Int(p.r), g = Int(p.g), b = Int(p.b)
-                    if b >= 150 && b > r + 45 && b > g + 15 && r <= 90 {
-                        activeBlue += 1
-                    }
-                    if r >= 205 && r <= 240 && g >= 220 && g <= 248 && b >= 238 && b <= 255 {
+
+                    let r = Int(p.r)
+                    let g = Int(p.g)
+                    let b = Int(p.b)
+                    let spread = max(r, max(g, b)) - min(r, min(g, b))
+
+                    // Existing pale-blue selection fill.
+                    if r >= 205 && r <= 240 &&
+                       g >= 220 && g <= 248 &&
+                       b >= 238 && b <= 255 {
                         paleBlue += 1
                     }
-                    let spread = max(r, max(g, b)) - min(r, min(g, b))
+
+                    // New macOS 26 active selected-row fill: controlAccentColor
+                    // blue. Renders as ~(0,122,255) in direct captures but as a
+                    // darker ~(0,85,197) in Tart VNC framebuffer grabs (gamma /
+                    // color-profile shift), so accept the full range — blue must
+                    // still clearly dominate green.
+                    if r <= 50 &&
+                       g >= 60 && g <= 150 &&
+                       b >= 180 &&
+                       b > g + 40 {
+                        saturatedBlue += 1
+                    }
+
+                    // Existing inactive-window gray selected row.
                     if p.luminance >= 185 && p.luminance <= 232 && spread <= 20 {
                         selectedGray += 1
+                    }
+
+                    // White text on saturated blue. VNC framebuffer grabs render
+                    // it antialiased and blue-tinted (~(210,230,248)), never pure
+                    // white, so accept bright blue-leaning whites. Card background
+                    // still can't qualify a row on its own because whiteText is
+                    // only consulted together with the saturated-blue fill gate.
+                    if r >= 150 && g >= 180 && b >= 220 {
+                        whiteText += 1
                     }
                 }
                 x += strideX
             }
             y += strideY
         }
-        guard total > 0 else { return false }
-        return Double(activeBlue) / Double(total) >= 0.18 ||
-               Double(paleBlue) / Double(total) >= 0.18 ||
-               Double(selectedGray) / Double(total) >= 0.28
+
+        guard total > 0 else {
+            return ListRowSelectionAppearance(
+                isSelected: false,
+                isPaleBlue: false,
+                isSaturatedBlue: false,
+                isSelectedGray: false,
+                hasWhiteText: false
+            )
+        }
+
+        let saturatedBlueRatio = Double(saturatedBlue) / Double(total)
+        let paleBlueRatio = Double(paleBlue) / Double(total)
+        let selectedGrayRatio = Double(selectedGray) / Double(total)
+        let whiteTextRatio = Double(whiteText) / Double(total)
+
+        let hasSaturatedBlue = saturatedBlueRatio >= 0.18
+        let hasPaleBlue = paleBlueRatio >= 0.18
+        let hasSelectedGray = selectedGrayRatio >= 0.28
+        let hasWhiteText = whiteTextRatio >= 0.006
+
+        // Saturated blue needs white text confirmation. Pale blue and inactive gray
+        // keep the older behavior because their text may be dark or antialiased.
+        let selected =
+            hasPaleBlue ||
+            hasSelectedGray ||
+            (hasSaturatedBlue && hasWhiteText)
+
+        return ListRowSelectionAppearance(
+            isSelected: selected,
+            isPaleBlue: hasPaleBlue,
+            isSaturatedBlue: hasSaturatedBlue,
+            isSelectedGray: hasSelectedGray,
+            hasWhiteText: hasWhiteText
+        )
+    }
+
+    private func ocrSelectedListRowWhiteText(_ rect: CGRect) -> String? {
+        guard let image = workingFullCGImage else { return nil }
+
+        let expanded = rect.insetBy(dx: -4, dy: -2).integral
+        let bounds = CGRect(x: 0, y: 0, width: image.width, height: image.height)
+        let cropRect = expanded.intersection(bounds)
+
+        guard cropRect.width >= 20,
+              cropRect.height >= 10,
+              let crop = image.cropping(to: cropRect)
+        else {
+            return nil
+        }
+
+        // Vision reads white-on-blue selection text directly from the raw band
+        // crop. The binarizing makeDarkerTextOCRImage pass erases antialiased
+        // glyph pixels (VNC framebuffer text is blue-tinted, never pure white)
+        // and turned "United States" into "UrhadiStatie" or nothing — keep it
+        // only as a fallback for palettes the raw pass can't handle.
+        if let label = runSelectedRowOCR(on: crop) {
+            return label
+        }
+        guard let prepared = makeDarkerTextOCRImage(from: crop) else { return nil }
+        return runSelectedRowOCR(on: prepared)
+    }
+
+    private func runSelectedRowOCR(on cgImage: CGImage) -> String? {
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.usesLanguageCorrection = false
+        request.minimumTextHeight = 0.05
+
+        let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+        do {
+            try handler.perform([request])
+        } catch {
+            return nil
+        }
+
+        let candidates = (request.results ?? [])
+            .compactMap { $0.topCandidates(1).first?.string }
+            .map { cleanListOptionLabel($0) }
+            .filter { !$0.isEmpty }
+            .filter { isPlausibleListOptionText($0) }
+
+        if let exact = candidates.first(where: { !$0.contains("\n") && $0.count <= 40 }) {
+            return exact
+        }
+
+        return candidates.first
+    }
+
+    private func makeDarkerTextOCRImage(from image: CGImage) -> CGImage? {
+        let width = image.width
+        let height = image.height
+
+        guard width > 0, height > 0 else { return nil }
+
+        let bytesPerPixel = 4
+        let bytesPerRow = width * bytesPerPixel
+        var src = [UInt8](repeating: 0, count: height * bytesPerRow)
+
+guard let srcContext = CGContext(
+            data: &src,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            return nil
+        }
+
+        srcContext.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+
+        var dst = Array(repeating: UInt8(255), count: height * bytesPerRow)
+
+        for y in 0..<height {
+            for x in 0..<width {
+                let i = y * bytesPerRow + x * bytesPerPixel
+                let r = Int(src[i])
+                let g = Int(src[i + 1])
+                let b = Int(src[i + 2])
+                let spread = max(r, max(g, b)) - min(r, min(g, b))
+
+                let isWhiteGlyph =
+                    r >= 220 &&
+                    g >= 220 &&
+                    b >= 220 &&
+                    spread <= 35
+
+                let isSaturatedSelection =
+                    r <= 70 &&
+                    g >= 85 && g <= 160 &&
+                    b >= 210
+
+                let isPaleSelection =
+                    r >= 205 && r <= 245 &&
+                    g >= 220 && g <= 252 &&
+                    b >= 235 && b <= 255
+
+                // Produce high-contrast black text on white background.
+                // This is the inverted/darker-text pass for white glyphs.
+                if isWhiteGlyph {
+                    dst[i] = 0
+                    dst[i + 1] = 0
+                    dst[i + 2] = 0
+                    dst[i + 3] = 255
+                } else if isSaturatedSelection || isPaleSelection {
+                    dst[i] = 255
+                    dst[i + 1] = 255
+                    dst[i + 2] = 255
+                    dst[i + 3] = 255
+                } else {
+                    dst[i] = 255
+                    dst[i + 1] = 255
+                    dst[i + 2] = 255
+                    dst[i + 3] = 255
+                }
+            }
+        }
+
+        guard let dstContext = CGContext(
+            data: &dst,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            return nil
+        }
+
+        return dstContext.makeImage()
     }
 
     private func median(_ values: [CGFloat]) -> CGFloat {
         guard !values.isEmpty else { return 0 }
-        let sorted = values.sorted()
-        let mid = sorted.count / 2
-        if sorted.count % 2 == 1 { return sorted[mid] }
-        return (sorted[mid - 1] + sorted[mid]) / 2.0
+        let sorted = values.sorted(); let mid = sorted.count / 2
+        return sorted.count % 2 == 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2.0
     }
 
     private func looksLikeListPicker(_ controls: [DetectedVisionControl]) -> Bool {
@@ -842,6 +1441,48 @@ final class VisionControlDetector {
         }
     }
 
+    // MARK: - Stage 4c2: full-bleed hello screen button promotion
+
+    /// The full-bleed hello screens have exactly one control: a pill button at
+    /// bottom-center whose label is LOCALIZED while the greeting animation
+    /// cycles ("Fortsätt", "Continuer", …), so the exact-label button table
+    /// can't know it. When the scene classified as the hello screen and no
+    /// button was detected, promote the short OCR text sitting in the
+    /// bottom-center band to a button so click_control(role: button) works.
+    private func promoteHelloBottomCenterButton(
+        _ controls: [DetectedVisionControl],
+        scene: SceneDefinition?,
+        imageWidth: CGFloat,
+        imageHeight: CGFloat
+    ) -> [DetectedVisionControl] {
+        guard scene?.identifier == "hello" else { return controls }
+        guard !controls.contains(where: { $0.type == "button" }) else { return controls }
+        guard let candidate = controls
+            .filter({ control in
+                control.type == "text" &&
+                control.rect.midY >= imageHeight * 0.72 &&
+                abs(control.rect.midX - imageWidth / 2) <= imageWidth * 0.22 &&
+                control.rect.width <= imageWidth * 0.25 &&
+                control.label.count >= 2 && control.label.count <= 24
+            })
+            .min(by: { abs($0.rect.midX - imageWidth / 2) < abs($1.rect.midX - imageWidth / 2) })
+        else { return controls }
+
+        return controls.map { control in
+            guard control.type == "text", control.rect == candidate.rect else { return control }
+            let padded = control.rect.insetBy(dx: -14, dy: -8)
+            return DetectedVisionControl(
+                type: "button",
+                label: control.label,
+                confidence: max(control.confidence, 0.85),
+                rect: padded,
+                selected: nil,
+                controlCenter: CGPoint(x: padded.midX, y: padded.midY),
+                style: "secondary"
+            )
+        }
+    }
+
     // MARK: - Stage 4d: text_field_by_position selector stamping
 
     private func applyTextFieldSelectors(
@@ -983,9 +1624,12 @@ final class VisionControlDetector {
         case "checkbox":     return .checkbox
         case "radio":        return .radioButton
         case "radio-option": return .radioOption
+        case "menuitem":     return .menuItem
         case "toggle":       return .toggleSwitch
         case "text":         return .text
         case "textfield":    return .textField
+        case "menubar-item": return .menuBarItem
+        case "dock-item":    return .dockItem
         default:             return .unknown
         }
     }
@@ -1130,9 +1774,15 @@ final class VisionControlDetector {
                 labels: labels
             ))
         }
-        controls.append(contentsOf: classifyTextControls(labels, image: rgb))
+        let textControls = classifyTextControls(labels, image: rgb)
+        controls.append(contentsOf: textControls)
 
         if let rgb {
+            controls.append(contentsOf: detectPopoverMenuItems(
+                labels: labels,
+                existingControls: controls,
+                image: rgb
+            ))
             let components = findConnectedComponents(in: rgb)
             controls.append(contentsOf: detectRadioButtons(
                 in: rgb, components: components, labels: labels))
@@ -1142,6 +1792,35 @@ final class VisionControlDetector {
                 in: rgb, components: components, labels: labels))
             controls.append(contentsOf: detectArrowContinueButton(
                 in: rgb, components: components, existingControls: controls))
+
+            // Chevron navigation rows (e.g. Age Range: Child/Teen/Adult ›). The
+            // x-aligned, row-pitched chevron column is a stronger signal than a
+            // stray radio hit, so when at least two rows fire they own their row
+            // bands: any "radio" detected inside a band is really the row's
+            // leading icon (Age Range's blue person glyphs), not a radio button.
+            let navRows = detectChevronNavRows(in: rgb, labels: labels)
+                .filter { row in
+                    !controls.contains {
+                        $0.type == "button" &&
+                        intersectionRatio($0.rect, row.rect) > 0.3
+                    }
+                }
+            vcsDebug("chevRows filtered=\(navRows.count)")
+            if navRows.count >= 2 {
+                // Radios/checkboxes in a band are the rows' leading icons;
+                // textfields are the rows' light-gray fills misread as fields.
+                // All of these outrank the nav row in mergeControls and would
+                // erase it.
+                let evicted: Set<String> = ["radio", "checkbox", "toggle", "textfield"]
+                controls.removeAll { control in
+                    evicted.contains(control.type) &&
+                    navRows.contains { row in
+                        control.rect.midY >= row.rect.minY &&
+                        control.rect.midY <= row.rect.maxY
+                    }
+                }
+                controls.append(contentsOf: navRows)
+            }
         }
 
         var merged = mergeControls(controls)
@@ -1455,7 +2134,15 @@ final class VisionControlDetector {
 
     private func findChevronCandidates(
         in image: RGBImage,
-        region: CGRect
+        region: CGRect,
+        minWidth: Int = 10,
+        maxWidth: Int = 40,
+        minHeight: Int = 10,
+        maxHeight: Int = 38,
+        minCount: Int = 8,
+        minAspect: Double = 0.55,
+        maxAspect: Double = 1.6,
+        minPointiness: Double = 0.45
     ) -> [ChevronCandidate] {
         let minX = max(0, Int(region.minX.rounded()))
         let maxX = min(image.width - 1, Int(region.maxX.rounded()))
@@ -1526,11 +2213,11 @@ final class VisionControlDetector {
 
                 let width = componentMaxX - componentMinX + 1
                 let height = componentMaxY - componentMinY + 1
-                guard width >= 10, width <= 40,
-                      height >= 10, height <= 38,
-                      count >= 8 else { continue }
+                guard width >= minWidth, width <= maxWidth,
+                      height >= minHeight, height <= maxHeight,
+                      count >= minCount else { continue }
                 let aspect = Double(width) / Double(max(height, 1))
-                guard aspect >= 0.55, aspect <= 1.6 else { continue }
+                guard aspect >= minAspect, aspect <= maxAspect else { continue }
                 let fillRatio = Double(count) / Double(max(width * height, 1))
                 guard fillRatio >= 0.10, fillRatio <= 0.45 else { continue }
 
@@ -1541,7 +2228,7 @@ final class VisionControlDetector {
                     minY: componentMinY,
                     maxY: componentMaxY
                 )
-                guard pointiness >= 0.45 else { continue }
+                guard pointiness >= minPointiness else { continue }
 
                 let rect = CGRect(
                     x: componentMinX,
@@ -1603,6 +2290,142 @@ final class VisionControlDetector {
             (max(0, aspectScore) * 0.15) +
             (sizeScore * 0.15)
         return min(0.93, max(0.60, raw))
+    }
+
+    // MARK: - Chevron Navigation Rows (e.g. Age Range: Child / Teen / Adult ›)
+    //
+    // Some macOS 26 Setup Assistant screens present choices as full-width rows with
+    // a right-aligned chevron (›) rather than radios or buttons. The single "Next"
+    // chevron detector above only scans the bottom-right corner and returns one
+    // glyph, so these screens previously yielded zero controls. This finds every
+    // right-pointing chevron sitting near the right edge of the card, pairs each
+    // with the left-aligned OCR text on the same row, and emits them as options
+    // (type "radio-option" → role "option"). Callers should only invoke this when
+    // no option/radio controls were already found, so it can't fight the normal
+    // list-picker path.
+    private func detectChevronNavRows(
+        in image: RGBImage,
+        labels: [TextLabel]
+    ) -> [DetectedVisionControl] {
+        let w = CGFloat(image.width)
+        let h = CGFloat(image.height)
+        // Right ~45% of the card, skipping the very top and bottom margins where a
+        // back-chevron or Next-arrow would live.
+        let region = CGRect(x: w * 0.55, y: h * 0.12, width: w * 0.45, height: h * 0.80)
+            .intersection(CGRect(x: 0, y: 0, width: w, height: h))
+        let chevrons = findChevronCandidates(
+            in: image,
+            region: region,
+            minWidth: 5, maxWidth: 30,
+            minHeight: 7, maxHeight: 30,
+            minCount: 5,
+            minAspect: 0.30, maxAspect: 1.7,
+            minPointiness: 0.38
+        ).sorted { $0.rect.minY < $1.rect.minY }
+        vcsDebug("chevNav image=\(image.width)x\(image.height) region=\(region) candidates=\(chevrons.count)")
+        for c in chevrons { vcsDebug("  cand rect=\(c.rect) count=\(c.pixelCount) fill=\(c.fillRatio) point=\(c.pointinessScore)") }
+        // Need at least two chevrons to look like a row list rather than a stray glyph.
+        guard chevrons.count >= 2 else { return [] }
+
+        // Real navigation rows share a right-aligned chevron column (same x within a
+        // small tolerance). Requiring that column rejects incidental gray strokes
+        // (text serifs, icons) that the relaxed size bounds would otherwise admit.
+        // Cluster by midX and take the largest cluster (rightmost on ties): body
+        // text can contribute more stray candidates than there are real rows, so
+        // a median would land in the noise.
+        var clusters: [[ChevronCandidate]] = []
+        for cand in chevrons.sorted(by: { $0.rect.midX < $1.rect.midX }) {
+            if var last = clusters.last,
+               let anchor = last.first,
+               abs(cand.rect.midX - anchor.rect.midX) <= 8 {
+                last.append(cand)
+                clusters[clusters.count - 1] = last
+            } else {
+                clusters.append([cand])
+            }
+        }
+        let column = (clusters.max { a, b in
+            if a.count != b.count { return a.count < b.count }
+            return a[0].rect.midX < b[0].rect.midX
+        } ?? [])
+            .sorted { $0.rect.minY < $1.rect.minY }
+        vcsDebug("chevNav column=\(column.count) clusters=\(clusters.map { $0.count })")
+        guard column.count >= 2 else { return [] }
+
+        // The column must be spaced like stacked rows, not clustered curves within
+        // a single icon or scattered text strokes: EVERY consecutive vertical gap
+        // must be in the row-pitch range. Body-text noise produces overlapping or
+        // wildly uneven gaps (Accessibility icon grid: [19.5, 117.5, -3, 47]),
+        // while real nav rows are uniform (Age Range: [59, 60]).
+        let ys = column.map { $0.rect.midY }
+        let gaps = zip(ys.dropFirst(), ys).map { $0 - $1 }
+        vcsDebug("chevNav gaps=\(gaps)")
+        guard gaps.allSatisfy({ $0 >= 28 && $0 <= 140 }) else { return [] }
+
+        // Find the left-aligned title text for each column chevron (same row, to its
+        // left). Require at least one chevron to have a real title — icon grids (e.g.
+        // Accessibility: Vision/Motor/Hearing/Cognitive) put their labels *below* the
+        // icon, not to the left, so this rejects them while keeping Age Range, whose
+        // "Adult" title sits to the left even when OCR drops the Child/Teen rows.
+        func titleFor(_ chevron: ChevronCandidate) -> (text: String, minX: CGFloat, conf: Double)? {
+            let tol = max(chevron.rect.height, 16)
+            let onRow = labels.filter {
+                abs($0.rect.midY - chevron.rect.midY) <= tol &&
+                $0.rect.maxX < chevron.rect.minX - 4
+            }
+            // A row renders title above its subtitle with the chevron centered
+            // between them, so the title is the label at-or-above the chevron's
+            // midY; the subtitle ("18 or older") is below. Fall back to the
+            // closest label when nothing sits above.
+            let above = onRow.filter { $0.rect.midY <= chevron.rect.midY + 2 }
+            let pool = above.isEmpty ? onRow : above
+            guard let best = pool.min(by: {
+                abs($0.rect.midY - chevron.rect.midY) < abs($1.rect.midY - chevron.rect.midY)
+            }) else { return nil }
+            // OCR can absorb the row's leading icon into the text ("* Child").
+            var cleaned = cleanListOptionLabel(best.text)
+            while let first = cleaned.first, !first.isLetter, !first.isNumber {
+                cleaned.removeFirst()
+                cleaned = cleaned.trimmingCharacters(in: .whitespaces)
+            }
+            guard !cleaned.isEmpty else { return nil }
+            return (cleaned, best.rect.minX, best.confidence)
+        }
+        let titles = column.map { titleFor($0) }
+        vcsDebug("chevNav titles=\(titles.map { $0?.text ?? "nil" })")
+        guard titles.contains(where: { $0 != nil }) else { return [] }
+
+        // Shared left edge for the row rectangles: the leftmost real title we found.
+        let columnLeft = titles.compactMap { $0?.minX }.min()
+            ?? max(0, column[0].rect.midX - w * 0.30)
+
+        var rows: [DetectedVisionControl] = []
+        for (i, chevron) in column.enumerated() {
+            let tolerance = max(chevron.rect.height, 16)
+            let title = titles[i]?.text ?? "option-\(i + 1)"
+            let labelConfidence = titles[i]?.conf ?? 0.60
+            let rowLeft = max(0, columnLeft - 8)
+            let rowRight = min(w - 1, chevron.rect.maxX + 6)
+            let rowTop = max(0, chevron.rect.minY - tolerance)
+            let rowBottom = min(h - 1, chevron.rect.maxY + tolerance)
+            let rowRect = CGRect(
+                x: rowLeft,
+                y: rowTop,
+                width: max(80, rowRight - rowLeft),
+                height: max(24, rowBottom - rowTop)
+            )
+            rows.append(DetectedVisionControl(
+                type: "radio-option",
+                label: title,
+                confidence: max(chevron.confidence, labelConfidence),
+                rect: rowRect,
+                selected: false,
+                controlCenter: CGPoint(x: chevron.rect.midX, y: chevron.rect.midY),
+                style: nil
+            ))
+        }
+        guard rows.count >= 2 else { return [] }
+        return rows
     }
 
     // MARK: - Chevron OCR garbage filter
@@ -1688,24 +2511,30 @@ final class VisionControlDetector {
         image: RGBImage?
     ) -> [DetectedVisionControl] {
         labels.map { label in
-            let type = classifyTextType(label.text)
-
+            var type = classifyTextType(label.text)
+            let cleanedLabel = cleanButtonLabel(label.text)
+            if isKnownPopoverMenuItemLabel(cleanedLabel) {
+                type = "menuitem"
+            }
             let selected: Bool?
             let style: String?
             if type == "button", let image {
                 let app = buttonAppearance(textRect: label.rect, image: image)
                 selected = app.enabled
-                style = app.style
+                style = isDropdownButtonLabel(raw: label.text, cleaned: cleanedLabel) ? "dropdown" : app.style
+            } else if type == "menuitem" {
+                selected = false
+                style = nil
             } else {
                 selected = nil
                 style = nil
             }
-            let center: CGPoint? = (type == "button")
+            let center: CGPoint? = (type == "button" || type == "menuitem")
                 ? CGPoint(x: label.rect.midX, y: label.rect.midY) : nil
-
+            let emittedLabel = (type == "button" || type == "menuitem") ? cleanedLabel : label.text
             return DetectedVisionControl(
                 type: type,
-                label: label.text,
+                label: emittedLabel,
                 confidence: label.confidence,
                 rect: label.rect.insetBy(dx: -12, dy: -8),
                 selected: selected,
@@ -1714,7 +2543,6 @@ final class VisionControlDetector {
             )
         }
     }
-
     /// Returns (enabled, style) for a button rect. The text-color check is
     /// the only reliable signal for disabled buttons on macOS 26 SA, which
     /// uses identical button geometry for both states.
@@ -1733,6 +2561,7 @@ final class VisionControlDetector {
         var lightInk = 0
         var whiteText = 0
         var bluePixels = 0
+        var bluishPixels = 0
         var total = 0
 
         for y in bgMinY...bgMaxY {
@@ -1741,6 +2570,13 @@ final class VisionControlDetector {
                 total += 1
                 let lum = pixel.luminance
                 if pixel.isSystemBlue { bluePixels += 1 }
+                // Downscale-tolerant blue: Lanczos downscaling (default 720px) blends
+                // white button text into the blue fill, producing light-blue pixels
+                // (r > 100) that fail the strict isSystemBlue test. This relaxed bucket
+                // still recognizes the fill so blue PRIMARY buttons (e.g. the Location
+                // "Don't Use" sheet button) aren't misread as disabled secondary.
+                let rr = Double(pixel.r), gg = Double(pixel.g), bb = Double(pixel.b)
+                if bb >= 150 && bb > rr + 40 && bb > gg + 25 { bluishPixels += 1 }
                 if lum < 60 { veryDark += 1 }
                 else if lum >= 235 { whiteText += 1 }
                 else if lum < 220 { lightInk += 1 }
@@ -1748,18 +2584,33 @@ final class VisionControlDetector {
         }
         guard total > 0 else { return (true, "secondary") }
 
-        let blueRatio  = Double(bluePixels) / Double(total)
-        let darkRatio  = Double(veryDark)   / Double(total)
-        let lightRatio = Double(lightInk)   / Double(total)
-        let whiteRatio = Double(whiteText)  / Double(total)
+        let blueRatio   = Double(bluePixels)   / Double(total)
+        let bluishRatio = Double(bluishPixels) / Double(total)
+        let darkRatio   = Double(veryDark)     / Double(total)
+        let lightRatio  = Double(lightInk)     / Double(total)
+        let whiteRatio  = Double(whiteText)    / Double(total)
 
+        // A predominantly blue fill is a primary button, regardless of how much of
+        // the white glyph survived downscaling.
+        if bluishRatio >= 0.40 {
+            return (true, "primary")
+        }
         if blueRatio >= 0.25 && whiteRatio >= 0.02 {
             return (true, "primary")
         }
         if darkRatio >= 0.03 {
             return (true, "secondary")
         }
-        if lightRatio >= 0.04 {
+        // Modal buttons rendered over a dimmed/blurred backdrop (e.g. the Terms &
+        // Conditions "Agree"/"Disagree" sheet) have anti-aliased text whose glyph ink
+        // lands mostly in the mid-tone (lightInk) bucket rather than the very-dark one.
+        // The old rule declared any such button disabled as soon as lightRatio >= 0.04,
+        // which mis-reported clearly-clickable modal buttons as enabled:false.
+        // A genuinely disabled button has essentially NO dark ink core; a live button —
+        // even a dimmed one — almost always keeps a few sub-60-luminance pixels at glyph
+        // centers. So only call it disabled when dark ink is essentially absent.
+        let hasDarkInkCore = darkRatio >= 0.008
+        if lightRatio >= 0.04 && !hasDarkInkCore {
             return (false, "secondary")
         }
         return (true, "secondary")
@@ -1768,10 +2619,10 @@ final class VisionControlDetector {
     private func classifyTextType(_ text: String) -> String {
         var normalized = text
             .trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: "⌄", with: "")
-            .replacingOccurrences(of: "▾", with: "")
-            .replacingOccurrences(of: "›", with: "")
-            .replacingOccurrences(of: "ˇ", with: "")
+            .replacingOccurrences(of: "â", with: "")
+            .replacingOccurrences(of: "â¾", with: "")
+            .replacingOccurrences(of: "âº", with: "")
+            .replacingOccurrences(of: "Ë", with: "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
         if let lastSpace = normalized.lastIndex(of: " "),
@@ -1781,13 +2632,18 @@ final class VisionControlDetector {
                 normalized = String(normalized[..<lastSpace])
             }
         }
+        if isKnownMacOSDropdownButtonLabel(normalized) {
+            return "button"
+        }
         let exactButtons: Set<String> = [
             "ok", "yes", "no", "done", "next", "back", "skip",
             "cancel", "close", "allow", "deny", "install",
             "continue", "submit", "save", "open", "choose",
             "setup", "finish", "agree", "accept", "decline",
             "create", "start", "stop", "retry", "disagree",
-            "not now", "browse"
+            "not now", "browse", "don't use", "dont use",
+            "turn on", "turn off", "set up later",
+            "only download automatically"
         ]
         if exactButtons.contains(normalized) {
             return "button"
@@ -1801,12 +2657,150 @@ final class VisionControlDetector {
             "create new apple account",
             "forgot password",
             "skip sign in",
-            "see how your data is managed"
+            "see how your data is managed",
+            "use location services"
         ]
         for p in prefixButtons {
             if normalized.hasPrefix(p) { return "button" }
         }
         return "text"
+    }
+
+    private func isPrivateUseUnicodeScalar(_ scalar: UnicodeScalar) -> Bool {
+        let value = scalar.value
+        return (0xE000...0xF8FF).contains(value) ||
+               (0xF0000...0xFFFFD).contains(value) ||
+               (0x100000...0x10FFFD).contains(value)
+    }
+
+    private func cleanButtonLabel(_ raw: String) -> String {
+        var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        text = text.replacingOccurrences(of: #"\.{4,}"#, with: "…", options: .regularExpression)
+        while let first = text.unicodeScalars.first,
+              CharacterSet.symbols.contains(first) || isPrivateUseUnicodeScalar(first) {
+            text.removeFirst()
+            text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        text = text.replacingOccurrences(of: #"^\d\s+"#, with: "", options: .regularExpression)
+        text = text.replacingOccurrences(of: #"^(li|f|g|&)\s+"#, with: "", options: [.regularExpression, .caseInsensitive])
+        text = text.replacingOccurrences(of: "Sign-li", with: "Sign-In")
+        text = text.replacingOccurrences(of: "Sign li", with: "Sign-In")
+        text = text.replacingOccurrences(of: "Sign A Options", with: "Sign-In Options")
+        text = text.replacingOccurrences(of: "Sign A", with: "Sign-In")
+        text = text.replacingOccurrences(of: "Sign-l", with: "Sign-I")
+        if isKnownMacOSDropdownButtonLabel(text) {
+            text = canonicalMacOSDropdownButtonLabel(text)
+        } else {
+            text = text
+                .replacingOccurrences(of: "▾", with: "")
+                .replacingOccurrences(of: "⌄", with: "")
+                .replacingOccurrences(of: "∨", with: "")
+                .replacingOccurrences(of: "›", with: "")
+                .replacingOccurrences(of: "ˇ", with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        while text.contains("  ") { text = text.replacingOccurrences(of: "  ", with: " ") }
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    private func normalizedDropdownButtonLabel(_ text: String) -> String {
+        var normalized = text.lowercased()
+            .replacingOccurrences(of: "▾", with: "")
+            .replacingOccurrences(of: "⌄", with: "")
+            .replacingOccurrences(of: "∨", with: "")
+            .replacingOccurrences(of: "›", with: "")
+            .replacingOccurrences(of: ">", with: "")
+            .replacingOccurrences(of: "ˇ", with: "")
+            .replacingOccurrences(of: "sign-li", with: "sign in")
+            .replacingOccurrences(of: "sign li", with: "sign in")
+            .replacingOccurrences(of: "sign a options", with: "sign in options")
+            .replacingOccurrences(of: "sign-in", with: "sign in")
+            .replacingOccurrences(of: "-", with: " ")
+        normalized = normalized.replacingOccurrences(of: #"^\d\s+"#, with: "", options: .regularExpression)
+        normalized = normalized.replacingOccurrences(of: #"^(li|f|g|&)\s+"#, with: "", options: [.regularExpression, .caseInsensitive])
+        normalized = normalized.replacingOccurrences(of: #"\s+v(\s|$)"#, with: " ", options: .regularExpression)
+        normalized = normalized.replacingOccurrences(of: #"\s*\(field-[^)]+\)"#, with: "", options: .regularExpression)
+        normalized = normalized.replacingOccurrences(of: #"\s*\[@[^\]]+\]"#, with: "", options: .regularExpression)
+        while normalized.contains("  ") { normalized = normalized.replacingOccurrences(of: "  ", with: " ") }
+        return normalized.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    private func isKnownMacOSDropdownButtonLabel(_ text: String) -> Bool {
+        let normalized = normalizedDropdownButtonLabel(text)
+        return normalized.contains("other sign in options") || normalized.contains("other sign options")
+    }
+    private func canonicalMacOSDropdownButtonLabel(_ text: String) -> String {
+        let normalized = normalizedDropdownButtonLabel(text)
+        if normalized.contains("other sign") && normalized.contains("options") { return "Other Sign-In Options" }
+        return text.replacingOccurrences(of: "▾", with: "").replacingOccurrences(of: "⌄", with: "").replacingOccurrences(of: "∨", with: "").replacingOccurrences(of: "›", with: "").replacingOccurrences(of: "ˇ", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    private func normalizedMenuItemLabel(_ text: String) -> String {
+        cleanButtonLabel(text).lowercased().replacingOccurrences(of: "…", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    private func isKnownPopoverMenuItemLabel(_ text: String) -> Bool {
+        let normalized = normalizedMenuItemLabel(text)
+        return normalized == "use multiple accounts" || normalized == "sign in later in settings" || normalized.contains("use multiple accounts") || normalized.contains("sign in later")
+    }
+    private func isDropdownButtonLabel(raw: String, cleaned: String) -> Bool {
+        if isKnownMacOSDropdownButtonLabel(raw) || isKnownMacOSDropdownButtonLabel(cleaned) { return true }
+        let rawTrimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return rawTrimmed.hasSuffix(" v") || rawTrimmed.hasSuffix("▾") || rawTrimmed.hasSuffix("⌄") || rawTrimmed.hasSuffix("∨") || rawTrimmed.hasSuffix("›") || rawTrimmed.hasSuffix("↓")
+    }
+    private func shouldPromoteTextFieldCandidateToDropdownButton(label: String, rect: CGRect, image: RGBImage) -> Bool {
+        guard isKnownMacOSDropdownButtonLabel(label) else { return false }
+        let aspect = rect.width / max(rect.height, 1)
+        let buttonSized = rect.height >= 24 && rect.height <= 52 && rect.width >= 110 && rect.width <= 360 && aspect >= 2.8 && aspect <= 9.0
+        guard buttonSized else { return false }
+        let interior = rect.insetBy(dx: max(8, rect.width * 0.06), dy: max(5, rect.height * 0.20))
+        let minX = max(0, Int(interior.minX.rounded()))
+        let maxX = min(image.width - 1, Int(interior.maxX.rounded()))
+        let minY = max(0, Int(interior.minY.rounded()))
+        let maxY = min(image.height - 1, Int(interior.maxY.rounded()))
+        guard maxX > minX, maxY > minY else { return true }
+        var total = 0, nearWhite = 0, glyph = 0
+        let strideX = max(1, (maxX - minX) / 90)
+        let strideY = max(1, (maxY - minY) / 10)
+        var y = minY
+        while y <= maxY {
+            var x = minX
+            while x <= maxX {
+                if let p = image.pixel(x: x, y: y) {
+                    total += 1
+                    if p.isNearWhite { nearWhite += 1 }
+                    if p.luminance < 190 { glyph += 1 }
+                }
+                x += strideX
+            }
+            y += strideY
+        }
+        guard total > 0 else { return true }
+        let nearWhiteRatio = Double(nearWhite) / Double(total)
+        let glyphRatio = Double(glyph) / Double(total)
+        return glyphRatio >= 0.025 || nearWhiteRatio < 0.94
+    }
+    private func promoteKnownAppleAccountDropdownButtons(_ controls: [DetectedVisionControl]) -> [DetectedVisionControl] {
+        controls.map { control in
+            guard control.type == "textfield", isKnownMacOSDropdownButtonLabel(control.label) else { return control }
+            return DetectedVisionControl(type: "button", label: canonicalMacOSDropdownButtonLabel(control.label), confidence: max(control.confidence, 0.90), rect: control.rect, selected: true, controlCenter: control.controlCenter ?? CGPoint(x: control.rect.midX, y: control.rect.midY), style: "dropdown")
+        }
+    }
+    private func detectPopoverMenuItems(labels: [TextLabel], existingControls: [DetectedVisionControl], image: RGBImage) -> [DetectedVisionControl] {
+        var output: [DetectedVisionControl] = []
+        let existingMenuItems = existingControls.filter { $0.type == "menuitem" }
+        let allCandidates = existingControls + labels.map { label in
+            DetectedVisionControl(type: "text", label: label.text, confidence: label.confidence, rect: label.rect.insetBy(dx: -12, dy: -8), selected: nil, controlCenter: nil, style: nil)
+        }
+        let useMultiple = allCandidates.first { normalizedMenuItemLabel($0.label).contains("use multiple accounts") }
+        if let useMultiple {
+            if !existingMenuItems.contains(where: { normalizedMenuItemLabel($0.label).contains("use multiple accounts") }) {
+                output.append(DetectedVisionControl(type: "menuitem", label: "Use Multiple Accounts", confidence: max(useMultiple.confidence, 0.88), rect: useMultiple.rect, selected: false, controlCenter: CGPoint(x: useMultiple.rect.midX, y: useMultiple.rect.midY), style: nil))
+            }
+            let hasSignLater = existingMenuItems.contains { normalizedMenuItemLabel($0.label).contains("sign in later") } || labels.contains { normalizedMenuItemLabel($0.text).contains("sign in later") }
+            if !hasSignLater {
+                let rowHeight = max(useMultiple.rect.height, 31)
+                let synthesizedRect = CGRect(x: useMultiple.rect.minX, y: useMultiple.rect.minY + rowHeight - 1, width: max(useMultiple.rect.width, 184), height: rowHeight)
+                output.append(DetectedVisionControl(type: "menuitem", label: "Sign in Later in Settings", confidence: 0.86, rect: synthesizedRect, selected: false, controlCenter: CGPoint(x: synthesizedRect.midX, y: synthesizedRect.midY), style: nil))
+            }
+        }
+        return output
     }
 
     // MARK: - Text Fields
@@ -1832,11 +2826,15 @@ final class VisionControlDetector {
             let label = bestTextFieldLabel(for: rect, labels: labels)
             let detectedLabel = label?.text.trimmingCharacters(in: .whitespacesAndNewlines)
             let finalLabel = (detectedLabel?.isEmpty == false) ? detectedLabel! : ""
+            let paddedRect = rect.insetBy(dx: -4, dy: -4)
+            if shouldPromoteTextFieldCandidateToDropdownButton(label: finalLabel, rect: paddedRect, image: image) {
+                return DetectedVisionControl(type: "button", label: canonicalMacOSDropdownButtonLabel(finalLabel), confidence: max(label?.confidence ?? 0.90, 0.90), rect: paddedRect, selected: true, controlCenter: CGPoint(x: paddedRect.midX, y: paddedRect.midY), style: "dropdown")
+            }
             return DetectedVisionControl(
                 type: "textfield",
                 label: finalLabel,
                 confidence: max(label?.confidence ?? 0.78, 0.78),
-                rect: rect.insetBy(dx: -4, dy: -4),
+                rect: paddedRect,
                 selected: textFieldLooksFocused(rect, image: image),
                 controlCenter: CGPoint(x: rect.midX, y: rect.midY),
                 style: nil
@@ -1859,8 +2857,17 @@ final class VisionControlDetector {
         var output = controls
         var changed = true
 
-        // Iterate until stable — one snap can expose another sibling pair.
-        while changed {
+        // MUST be bounded: with 3+ interacting rects (e.g. the tall scrollable
+        // Language list, whose stacked rows + scrollbar all read as adjacent
+        // textfield candidates), snapping pair (A,B) can re-create overlap for
+        // (B,C), whose snap re-creates (A,B), cycling forever. This hung the
+        // Packer wait_for_scene loop for 5 minutes on 2026-07-01. Any
+        // legitimate cascade settles in a handful of passes.
+        var passes = 0
+
+        // Iterate until stable â one snap can expose another sibling pair.
+        while changed, passes < 8 {
+            passes += 1
             changed = false
             for i in 0..<output.count {
                 for j in (i + 1)..<output.count {
@@ -1878,7 +2885,7 @@ final class VisionControlDetector {
                     let yOverlap = max(0, min(a.maxY, b.maxY) - max(a.minY, b.minY))
                     guard yOverlap >= 4 else { continue }
 
-                    // 3. Trust the smaller box — too-tall boxes come from
+                    // 3. Trust the smaller box â too-tall boxes come from
                     //    pairing with a stray caption-line run.
                     let smaller = a.height <= b.height ? a : b
                     let snapY = smaller.minY
@@ -2410,44 +3417,40 @@ final class VisionControlDetector {
                        in image: RGBImage,
                        components: [ConnectedComponent],
                        labels: [TextLabel]
-                   ) -> [DetectedVisionControl] {
-                       var glyphRects: [(rect: CGRect, filled: Bool, confidence: Double)] = []
-
-                       // A) Filled checkboxes via connected components.
+                   ) -> [DetectedVisionControl] {                       var glyphRects: [(rect: CGRect, filled: Bool, confidence: Double)] = []
                        // A) Filled checkboxes via connected components.
                        for component in components {
                            let rect = component.rect
                            let w = rect.width
                            let h = rect.height
                            let aspect = w / max(h, 1)
-                           // Widened from 13-22 → 12-26 to handle Retina captures and
-                           // sub-pixel bbox snapping.
                            guard w >= 12, w <= 26, h >= 12, h <= 26,
                                  aspect >= 0.78, aspect <= 1.28 else { continue }
-                           // Lowered from 0.30 → 0.20 — the white checkmark "hole" can
-                           // drop blueRatio below 0.30 on small glyphs.
                            guard component.blueRatio >= 0.20 else { continue }
-                           // Lowered from 0.55 → 0.45 for the same reason.
                            guard component.fillRatio >= 0.45 else { continue }
-                           // Use the existing circle discriminator instead of corner
-                           // sampling. Rounded-corner checkboxes have BRIGHT corner pixels
-                           // (the rounded corner falls outside the blue) but the SIDES of
-                           // the bbox are solidly blue. `looksCircular` returns true only
-                           // when 3+ corners are bright AND the bbox is small enough that
-                           // the inscribed-circle assumption holds. We invert: if it's not
-                           // circular, treat as a square = checkbox.
                            if looksCircular(rect: rect, in: image) { continue }
-
-                           // A) Filled checkboxes via dedicated border scan.
-                           glyphRects.append(contentsOf: findFilledCheckboxes(in: image))
-
-                           // B) Empty checkboxes via border scan.
-                           glyphRects.append(contentsOf: findEmptyCheckboxes(in: image))
+                           // Same bounding-ring guard as the sliding-window scan: reject
+                           // blue blobs that are part of a larger blue field (photographic
+                           // water/sky on the "hello" transition frames, primary buttons).
+                           if blueRingRatio(
+                               image: image,
+                               minX: Int(rect.minX.rounded()), minY: Int(rect.minY.rounded()),
+                               maxX: Int(rect.maxX.rounded()), maxY: Int(rect.maxY.rounded()),
+                               gap: 3
+                           ) >= 0.5 {
+                               continue
+                           }
+                           guard filledCheckboxInteriorPasses(
+                               image: image,
+                               minX: Int(rect.minX.rounded()), minY: Int(rect.minY.rounded()),
+                               maxX: Int(rect.maxX.rounded()), maxY: Int(rect.maxY.rounded())
+                           ) else { continue }
+                           glyphRects.append((rect, true, 0.84))
                        }
-
-                       // B) Empty checkboxes via border scan.
+                       // B) Dedicated full-frame scans. These MUST be outside the component loop;
+                       // otherwise no glyphs are emitted if component filtering rejects every candidate.
+                       glyphRects.append(contentsOf: findFilledCheckboxes(in: image))
                        glyphRects.append(contentsOf: findEmptyCheckboxes(in: image))
-
                        // De-dupe glyphs (filled wins over empty).
                        let glyphs = mergeCheckboxGlyphs(glyphRects)
 
@@ -2457,6 +3460,18 @@ final class VisionControlDetector {
                        var fallbackIndex = 0
                        for glyph in glyphs {
                            let labelInfo = checkboxLabel(for: glyph.rect, labels: labels)
+                           // Every real filled (checked) Setup Assistant checkbox has its
+                           // label text directly to the right. Filled candidates with no
+                           // such text are windows into decorative artwork — the Location
+                           // arrow icon, the Siri orb, avatar icons — that survive the
+                           // pixel gates because they genuinely are system blue + white.
+                           if glyph.filled && labelInfo == nil {
+                               vcsDebug("filled glyph dropped (no label) rect=\(glyph.rect); nearest right-labels: " +
+                                   labels.filter { abs($0.rect.midY - glyph.rect.midY) <= 40 }
+                                       .map { "'\($0.text)' minX=\($0.rect.minX) midY=\($0.rect.midY) (glyph maxX=\(glyph.rect.maxX) midY=\(glyph.rect.midY))" }
+                                       .joined(separator: "; "))
+                               continue
+                           }
                            fallbackIndex += 1
                            let labelText: String
                            let labelConfidence: Double
@@ -2464,7 +3479,7 @@ final class VisionControlDetector {
                                labelText = labelInfo.text
                                labelConfidence = labelInfo.confidence
                            } else {
-                               // No nearby OCR text — emit anyway with a positional fallback so
+                               // No nearby OCR text â emit anyway with a positional fallback so
                                // the runner can still target it.
                                labelText = "checkbox-\(fallbackIndex)"
                                labelConfidence = 0.60
@@ -2480,7 +3495,157 @@ final class VisionControlDetector {
                                style: nil
                            ))
                        }
+                       if let synthetic = synthesizeAppleAccountResetCheckboxFromOCR(labels: labels, image: image) {
+                           if let existingIndex = output.firstIndex(where: { $0.type == "checkbox" && ($0.label.lowercased().contains("allow computer account password") || $0.label.lowercased().contains("password to be reset") || $0.label.lowercased().contains("reset with your apple account")) }) {
+                               let existing = output[existingIndex]
+                               // Prefer the synthetic's label when it carries more of
+                               // the wrapped checkbox sentence — the glyph-associated
+                               // label is often just the merged first OCR line
+                               // ("Hint (Optional) Allow computer account password…"),
+                               // which loses the "sign in with your Apple Account"
+                               // clause the automation grammar matches on.
+                               let mergedLabel = synthetic.label.count > existing.label.count
+                                   ? synthetic.label : existing.label
+                               output[existingIndex] = DetectedVisionControl(type: existing.type, label: mergedLabel, confidence: max(existing.confidence, synthetic.confidence), rect: existing.rect.union(synthetic.rect), selected: (existing.selected == true || synthetic.selected == true), controlCenter: synthetic.controlCenter ?? existing.controlCenter, style: existing.style)
+                           } else { output.append(synthetic) }
+                       }
                        return dedupe(output)
+                   }
+                   private func synthesizeActionVerbCheckboxesFromOCR(labels: [TextLabel], image: RGBImage, existing: [DetectedVisionControl]) -> [DetectedVisionControl] {
+                       let actionPrefixes = [
+                           "enable ask siri",
+                           "enable location services on this mac"
+                       ]
+                       var output: [DetectedVisionControl] = []
+                       for label in labels {
+                           let stripped = stripLeadingCheckboxGlyph(label.text)
+                           let normalized = stripped.text.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+                           guard actionPrefixes.contains(where: { normalized.contains($0) }) else { continue }
+                           let glyphSize = max(12.0, min(18.0, label.rect.height * 0.55))
+                           let glyphX: CGFloat
+                           if stripped.hadGlyph {
+                               glyphX = max(0, label.rect.minX + 2)
+                           } else {
+                               glyphX = max(0, label.rect.minX - glyphSize - 7)
+                           }
+                           let glyphRect = CGRect(x: glyphX, y: label.rect.midY - glyphSize / 2.0, width: glyphSize, height: glyphSize)
+                           if existing.contains(where: { $0.type == "checkbox" && intersectionRatio($0.rect, glyphRect) > 0.25 }) { continue }
+                           let probe = probeCheckboxGlyph(glyphRect, in: image)
+                           let selected = stripped.hadCheckedGlyph || probe.filled
+                           let combinedRect = glyphRect.union(label.rect).insetBy(dx: -4, dy: -4)
+                           output.append(DetectedVisionControl(
+                               type: "checkbox",
+                               label: stripped.text,
+                               confidence: max(label.confidence, probe.confidence),
+                               rect: combinedRect,
+                               selected: selected,
+                               controlCenter: CGPoint(x: glyphRect.midX, y: glyphRect.midY),
+                               style: nil
+                           ))
+                       }
+                       return output
+                   }
+                   private func stripLeadingCheckboxGlyph(_ raw: String) -> (text: String, hadGlyph: Bool, hadCheckedGlyph: Bool) {
+                       var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                       let glyphs: Set<Character> = ["J", "/", "✓", "✔", "☑", "☒", "□", "■", "☐"]
+                       var hadGlyph = false
+                       var hadCheckedGlyph = false
+                       while let first = text.first, glyphs.contains(first) {
+                           hadGlyph = true
+                           if first != "□" && first != "☐" { hadCheckedGlyph = true }
+                           text.removeFirst()
+                           text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                       }
+                       return (text, hadGlyph, hadCheckedGlyph)
+                   }
+                   private func probeCheckboxGlyph(_ glyphRect: CGRect, in image: RGBImage) -> (filled: Bool, confidence: Double, blueRatio: Double, whiteRatio: Double) {
+                       let sample = glyphRect.insetBy(dx: -2, dy: -2)
+                       let minX = max(0, Int(sample.minX.rounded()))
+                       let maxX = min(image.width - 1, Int(sample.maxX.rounded()))
+                       let minY = max(0, Int(sample.minY.rounded()))
+                       let maxY = min(image.height - 1, Int(sample.maxY.rounded()))
+                       guard maxX > minX, maxY > minY else { return (false, 0.55, 0, 0) }
+                       var total = 0, blue = 0, white = 0, border = 0
+                       for y in minY...maxY {
+                           for x in minX...maxX {
+                               guard let p = image.pixel(x: x, y: y) else { continue }
+                               total += 1
+                               if p.isSystemBlue || p.isBlue { blue += 1 }
+                               if p.isNearWhite { white += 1 }
+                               if p.isCheckboxEmptyBorder { border += 1 }
+                           }
+                       }
+                       guard total > 0 else { return (false, 0.55, 0, 0) }
+                       let blueRatio = Double(blue) / Double(total)
+                       let whiteRatio = Double(white) / Double(total)
+                       let borderRatio = Double(border) / Double(total)
+                       let filled = blueRatio >= 0.08 || (blueRatio >= 0.045 && whiteRatio >= 0.08)
+                       let confidence = filled ? min(0.92, 0.70 + blueRatio) : (borderRatio >= 0.08 ? 0.74 : 0.64)
+                       return (filled, confidence, blueRatio, whiteRatio)
+                   }
+                   private func synthesizeAppleAccountResetCheckboxFromOCR(labels: [TextLabel], image: RGBImage) -> DetectedVisionControl? {
+                       let haystack = labels.map { $0.text.lowercased() }.joined(separator: " | ")
+                       let strongAnchors = ["allow computer account password", "allow computer account password to be reset", "password to be reset", "reset with your apple account"]
+                       let appleResetContextExists = strongAnchors.contains { haystack.contains($0) }
+                       let matches = labels.filter { label in
+                           let normalized = label.text.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+                           if strongAnchors.contains(where: { normalized.contains($0) }) { return true }
+                           if appleResetContextExists && normalized.contains("use this feature") { return true }
+                           return false
+                       }
+                       guard let first = matches.sorted(by: { $0.rect.minY < $1.rect.minY }).first else { return nil }
+                       let raw = first.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                       let glyphChars: Set<Character> = ["/", "✓", "✔", "☑"]
+                       let trimmedRaw = raw.drop(while: { $0.isWhitespace })
+                       let firstGlyphIsInOCRLine = trimmedRaw.first.map { glyphChars.contains($0) } ?? false
+                       var clean = raw.replacingOccurrences(of: "/", with: "").replacingOccurrences(of: "✓", with: "").replacingOccurrences(of: "✔", with: "").replacingOccurrences(of: "☑", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+                       // OCR can merge the Hint field's placeholder into the anchor
+                       // line ("Hint (Optional) Allow computer account password…").
+                       // Cut everything before the sentence start so downstream
+                       // label_contains matching sees the real checkbox text.
+                       if let anchorRange = clean.range(of: "allow computer account password", options: .caseInsensitive),
+                          anchorRange.lowerBound != clean.startIndex {
+                           clean = String(clean[anchorRange.lowerBound...])
+                       }
+                       // The checkbox text wraps over ~3 OCR lines; the anchor line
+                       // alone drops "You must sign in with your Apple Account…",
+                       // which the automation grammar matches on. Chain the lines
+                       // directly below the anchor that share its text column.
+                       var blockBottom = first.rect
+                       var lastRect = first.rect
+                       let continuations = labels
+                           .filter { $0.rect.minY > first.rect.minY + 2 }
+                           .sorted { $0.rect.minY < $1.rect.minY }
+                       for line in continuations {
+                           let sameColumn = line.rect.minX > first.rect.minX - 30 &&
+                                            line.rect.minX < first.rect.minX + 60
+                           let verticallyChained = line.rect.minY < lastRect.maxY + lastRect.height * 1.2
+                           guard sameColumn, verticallyChained else { continue }
+                           let text = line.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                           guard !text.isEmpty else { continue }
+                           vcsDebug("resetCbx chained line=\(text) rect=\(line.rect)")
+                           clean += " " + text
+                           lastRect = line.rect
+                           blockBottom = blockBottom.union(line.rect)
+                       }
+                       vcsDebug("resetCbx label=\(clean) anchorRect=\(first.rect) blockRect=\(blockBottom)")
+                       let glyphSize: CGFloat = 16
+                       let glyphX: CGFloat = firstGlyphIsInOCRLine ? first.rect.minX + 2 : max(0, first.rect.minX - glyphSize - 6)
+                       let glyphRect = CGRect(x: glyphX, y: first.rect.midY - glyphSize / 2, width: glyphSize, height: glyphSize)
+                       let combinedRect = glyphRect.union(blockBottom).insetBy(dx: -4, dy: -4)
+                       let pixelSampleSaysChecked = appleResetCheckboxGlyphLooksSelected(glyphRect: glyphRect, in: image)
+                       return DetectedVisionControl(type: "checkbox", label: clean, confidence: max(first.confidence, 0.80), rect: combinedRect, selected: firstGlyphIsInOCRLine || pixelSampleSaysChecked, controlCenter: CGPoint(x: glyphRect.midX, y: glyphRect.midY), style: nil)
+                   }
+                   private func appleResetCheckboxGlyphLooksSelected(glyphRect: CGRect, in image: RGBImage) -> Bool {
+                       let sample = glyphRect.insetBy(dx: 2, dy: 2)
+                       let minX = max(0, Int(sample.minX.rounded())), maxX = min(image.width - 1, Int(sample.maxX.rounded()))
+                       let minY = max(0, Int(sample.minY.rounded())), maxY = min(image.height - 1, Int(sample.maxY.rounded()))
+                       guard maxX > minX, maxY > minY else { return false }
+                       var total = 0, blue = 0, white = 0
+                       for y in minY...maxY { for x in minX...maxX { guard let p = image.pixel(x: x, y: y) else { continue }; total += 1; if p.isSystemBlue || p.isBlue { blue += 1 }; if p.isNearWhite { white += 1 } } }
+                       guard total > 0 else { return false }
+                       let blueRatio = Double(blue) / Double(total), whiteRatio = Double(white) / Double(total)
+                       return blueRatio >= 0.18 || (blueRatio >= 0.10 && whiteRatio >= 0.10)
                    }
 
                    private func findEmptyCheckboxes(
@@ -2532,22 +3697,9 @@ final class VisionControlDetector {
             let maxY = originY + size - 1
             guard maxX < image.width, maxY < image.height else { continue }
 
-            var blueCount = 0, whiteCount = 0, total = 0
-            for ys in minY...maxY {
-                for xs in minX...maxX {
-                    guard let p = image.pixel(x: xs, y: ys) else { continue }
-                    total += 1
-                    if p.isSystemBlue || p.isBlue { blueCount += 1 }
-                    else if p.isNearWhite { whiteCount += 1 }
-                }
-            }
-            guard total > 0 else { continue }
-            let blueRatio  = Double(blueCount)  / Double(total)
-            let whiteRatio = Double(whiteCount) / Double(total)
-
-            // Filled checkbox: ≥45 % blue (was 55 %), white checkmark optional.
-            guard blueRatio  >= 0.45, blueRatio  <= 0.98 else { continue }
-            guard whiteRatio <= 0.45 else { continue }    // ← removed lower bound
+            guard filledCheckboxInteriorPasses(
+                image: image, minX: minX, minY: minY, maxX: maxX, maxY: maxY
+            ) else { continue }
 
             // 3+ of the 4 inset corners must be blue. Sampling 3 px in to
             // safely clear the rounded-corner antialias band.
@@ -2565,9 +3717,97 @@ final class VisionControlDetector {
             }
             guard blueCorners >= 3 else { continue }
 
+            // Reject windows carved out of a larger blue shape — a saturated-blue
+            // primary button ("Don't Use"), the blue menu bar, etc. A real filled
+            // checkbox is a small blue square bounded by the white card, so the thin
+            // ring just outside it is mostly non-blue. If that ring is itself heavily
+            // blue, this candidate is interior to a big blue region, not a checkbox.
+            // Without this, one blue button was shredded into dozens of phantom
+            // "checkbox" controls.
+            if blueRingRatio(
+                image: image,
+                minX: minX, minY: minY, maxX: maxX, maxY: maxY, gap: 3
+            ) >= 0.5 {
+                continue
+            }
+
             return CGRect(x: minX, y: minY, width: size, height: size)
         }
         return nil
+    }
+
+    /// A real filled checkbox is flat macOS *system* blue carrying a white
+    /// checkmark, and contains almost nothing else. Measured on real scenes
+    /// (sysBlue/blue, white, other): genuine boxes ≈ (0.77+, 0.25–0.38, ≤0.03);
+    /// photographic wallpaper ≈ (0.00–0.04, 0.00, high); avatar icons and the
+    /// Siri orb ≈ (0.00–0.39, —, ≥0.11). These gates took the photographic
+    /// "hello" frames from ~338 phantom checkboxes to 0 while keeping the
+    /// genuine Siri/Location boxes.
+    private func filledCheckboxInteriorPasses(
+        image: RGBImage, minX: Int, minY: Int, maxX: Int, maxY: Int
+    ) -> Bool {
+        var blue = 0, sysBlue = 0, white = 0, total = 0
+        for y in minY...maxY {
+            for x in minX...maxX {
+                guard let p = image.pixel(x: x, y: y) else { continue }
+                total += 1
+                if p.isSystemBlue || p.isBlue {
+                    blue += 1
+                    if p.isSystemBlue { sysBlue += 1 }
+                } else if p.isNearWhite {
+                    white += 1
+                }
+            }
+        }
+        guard total > 0, blue > 0 else { return false }
+        let blueRatio = Double(blue) / Double(total)
+        let whiteRatio = Double(white) / Double(total)
+        let systemBlueShare = Double(sysBlue) / Double(blue)
+        let otherRatio = 1.0 - blueRatio - whiteRatio
+        guard blueRatio >= 0.45, blueRatio <= 0.98,
+              whiteRatio >= 0.10, whiteRatio <= 0.45,
+              systemBlueShare >= 0.5,
+              otherRatio <= 0.08 else { return false }
+
+        // A real checkbox is bounded by the card on BOTH sides. A window carved
+        // from a wide blue shape (primary button around its white text, the card's
+        // rounded corner against blue wallpaper) has blue continuing past its left
+        // or right edge, even when the overall ring reads < 0.5.
+        var leftBlue = 0, leftTotal = 0, rightBlue = 0, rightTotal = 0
+        for y in (minY - 3)...(maxY + 3) {
+            if let p = image.pixel(x: minX - 3, y: y) {
+                leftTotal += 1
+                if p.isSystemBlue || p.isBlue { leftBlue += 1 }
+            }
+            if let p = image.pixel(x: maxX + 3, y: y) {
+                rightTotal += 1
+                if p.isSystemBlue || p.isBlue { rightBlue += 1 }
+            }
+        }
+        let leftRatio = leftTotal > 0 ? Double(leftBlue) / Double(leftTotal) : 1
+        let rightRatio = rightTotal > 0 ? Double(rightBlue) / Double(rightTotal) : 1
+        return leftRatio <= 0.5 && rightRatio <= 0.5
+    }
+
+    /// Fraction of pixels in a thin ring `gap` px outside the given square that read
+    /// as blue. Used to distinguish a bounded blue checkbox glyph (ring mostly white
+    /// card) from a window interior to a larger blue shape (ring also blue).
+    private func blueRingRatio(
+        image: RGBImage, minX: Int, minY: Int, maxX: Int, maxY: Int, gap: Int
+    ) -> Double {
+        var blue = 0, total = 0
+        let ax0 = minX - gap, ax1 = maxX + gap
+        let ay0 = minY - gap, ay1 = maxY + gap
+        func sample(_ x: Int, _ y: Int) {
+            guard let p = image.pixel(x: x, y: y) else { return }
+            total += 1
+            if p.isSystemBlue || p.isBlue { blue += 1 }
+        }
+        var x = ax0
+        while x <= ax1 { sample(x, ay0); sample(x, ay1); x += 1 }
+        var y = ay0
+        while y <= ay1 { sample(ax0, y); sample(ax1, y); y += 1 }
+        return total > 0 ? Double(blue) / Double(total) : 0
     }
 
                    private func scanEmptyCheckboxAt(
@@ -2653,13 +3893,24 @@ final class VisionControlDetector {
                    ) -> (text: String, confidence: Double, rect: CGRect)? {
                        let firstLine = labels
                            .filter {
+                               guard abs($0.rect.midY - glyphRect.midY) <= 24 else { return false }
                                let leftGap = $0.rect.minX - glyphRect.maxX
-                               return leftGap >= 6 && leftGap <= 60 &&
-                                      abs($0.rect.midY - glyphRect.midY) <= 24
+                               if leftGap >= 6 && leftGap <= 60 { return true }
+                               // OCR can absorb the checkmark into the text line
+                               // ("J Enable Ask Siri"), making the line START inside
+                               // the glyph instead of to its right.
+                               return $0.rect.minX >= glyphRect.minX - 4 &&
+                                      $0.rect.minX <= glyphRect.maxX + 5
                            }
                            .min { $0.rect.minX < $1.rect.minX }
 
                        guard let first = firstLine else { return nil }
+                       let firstText: String
+                       if first.rect.minX < glyphRect.maxX {
+                           firstText = stripLeadingCheckboxGlyph(first.text).text
+                       } else {
+                           firstText = first.text
+                       }
 
                        let lineH = max(first.rect.height, 14)
                        let continuations = labels
@@ -2670,7 +3921,7 @@ final class VisionControlDetector {
                            }
                            .sorted { $0.rect.minY < $1.rect.minY }
 
-                       var assembled = first.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                       var assembled = firstText.trimmingCharacters(in: .whitespacesAndNewlines)
                        var accumRect = first.rect
                        var lastBottom = first.rect.maxY
                        var confidence = first.confidence
