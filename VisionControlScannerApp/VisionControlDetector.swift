@@ -3321,6 +3321,26 @@ guard let srcContext = CGContext(
                            }
                        }
 
+                       // Field-height bounds below were hardcoded absolute
+                       // pixels (18...42), calibrated against the ~720px-tall
+                       // images this pipeline used to always analyze at. At
+                       // VNC's native full resolution (analyzed with
+                       // --full-resolution to fix OCR on small multi-line
+                       // labels — see CLI/checkbox history), a real field is
+                       // ~50px tall: it fell OUTSIDE the old 42px cap and got
+                       // silently rejected, while the ~18px gap BETWEEN two
+                       // unrelated adjacent fields' borders fell squarely
+                       // inside the old window and got wrongly paired
+                       // instead — reproduced live via a real packer run's
+                       // "Create a Mac Account" screen, where every field
+                       // except one merged into a single bogus rect.
+                       // Scaling both bounds by image.height against that
+                       // same 720px reference keeps the window correct at
+                       // any analysis resolution.
+                       let fieldHeightRefImageHeight = 720.0
+                       let minFieldHeight = max(10, Int((18.0 / fieldHeightRefImageHeight) * Double(image.height)))
+                       let maxFieldHeight = max(minFieldHeight + 4, Int((42.0 / fieldHeightRefImageHeight) * Double(image.height)))
+
                        var rects: [CGRect] = []
                        for col in columns {
                            let byY = col.sorted { $0.y < $1.y }
@@ -3331,8 +3351,8 @@ guard let srcContext = CGContext(
                                for j in (i + 1)..<byY.count where !consumed[j] {
                                    let bottom = byY[j]
                                    let h = bottom.y - top.y + 1
-                                   if h < 18 { continue }
-                                   if h > 42 { break }
+                                   if h < minFieldHeight { continue }
+                                   if h > maxFieldHeight { break }
                                    let leftDelta = abs(top.minX - bottom.minX)
                                    let rightDelta = abs(top.maxX - bottom.maxX)
                                    let widthDelta = abs(top.width - bottom.width)

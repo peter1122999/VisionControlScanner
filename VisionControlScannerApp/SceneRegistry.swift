@@ -46,8 +46,7 @@ enum SceneRegistry {
         // List pickers
         AgeRangeScene.definition,               // NEW — before generic pickers
         CountryRegionScene.definition,
-        WrittenLanguageScene.definition,
-        SpokenLanguageScene.definition,
+        SpokenLanguageScene.definition,          // covers the combined Written+Spoken screen (see its own comment)
         KeyboardScene.definition,
         WiFiScene.definition,
         LanguageScene.definition,
