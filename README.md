@@ -1,5 +1,5 @@
 # Vision Control Scanner (VCS)
-
+# Claude Generated AI-Slop App to improve the reliablility of SetupAssistant Automation.
 Vision Control Scanner (VCS) is a macOS Setup Assistant screen-understanding toolkit used to detect scenes, OCR text, interactive controls, and click targets from screenshots. It includes a desktop app for visual inspection, a CLI for automation pipelines, and Tart/Packer-oriented JSON output for VM provisioning workflows.
 
 VCS is designed for macOS Setup Assistant automation where accessibility APIs may not be available or reliable. It analyzes screenshots with Apple-native Vision/CoreGraphics/AppKit code, classifies the current Setup Assistant scene, and emits structured controls such as text fields, buttons, checkboxes, radio options, toggles, and list-picker rows.
