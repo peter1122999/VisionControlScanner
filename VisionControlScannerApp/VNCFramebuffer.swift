@@ -239,12 +239,16 @@ final class VNCFramebufferConnection {
 
     // MARK: Pixel setup
 
-    /// Requests 32bpp BGRX (depth 24, little-endian) and restricts the
-    /// server to Raw encoding only — the one encoding every RFB server
-    /// must support, and the only one this client decodes. Trades a
-    /// little more bandwidth per frame for not needing Hextile/Tight/ZRLE
-    /// decoders; screenshots for UI detection are one-shot/low-frequency,
-    /// not a video stream, so that trade is the right one here.
+    /// Requests 32bpp BGRX (depth 24, little-endian). Raw is the only
+    /// pixel encoding this client decodes; DesktopSize/ExtendedDesktopSize/
+    /// Cursor/LastRect are pseudo-encodings carrying capability
+    /// declarations rather than a competing pixel format, and are
+    /// declared (with correct skip-parsing below) because Tart's
+    /// `--vnc-experimental` server crashed the whole VM on connect when a
+    /// client declared Raw-only with none of these — logged as `FIXME IF:
+    /// "It is unclear if we can support clients that don't support this
+    /// pseudo encoding." line 233` right before the VM died (reproduced
+    /// against a disposable `tart run` instance, not just guessed at).
     private func setPixelFormatAndEncodings() throws {
         var msg: [UInt8] = [0, 0, 0, 0]  // SetPixelFormat, 3 bytes padding
         msg.append(contentsOf: [
@@ -262,9 +266,15 @@ final class VNCFramebufferConnection {
         ])
         try writeAll(msg)
 
+        let encodings: [Int32] = [0, -223, -308, -239, -224]  // Raw, DesktopSize, ExtendedDesktopSize, Cursor, LastRect
         var enc: [UInt8] = [2, 0]  // SetEncodings, 1 byte padding
-        enc.append(contentsOf: [0, 1])  // number-of-encodings = 1
-        enc.append(contentsOf: [0, 0, 0, 0])  // encoding 0 = Raw
+        enc.append(UInt8(encodings.count >> 8 & 0xFF)); enc.append(UInt8(encodings.count & 0xFF))
+        for e in encodings {
+            enc.append(UInt8(truncatingIfNeeded: e >> 24))
+            enc.append(UInt8(truncatingIfNeeded: e >> 16))
+            enc.append(UInt8(truncatingIfNeeded: e >> 8))
+            enc.append(UInt8(truncatingIfNeeded: e))
+        }
         try writeAll(enc)
     }
 
@@ -296,29 +306,62 @@ final class VNCFramebufferConnection {
             }
             _ = try readU8()  // padding
             let numRects = try readU16()
-            for _ in 0..<numRects {
+            // A server that supports the LastRect pseudo-encoding may send
+            // 0xFFFF as a sentinel meaning "keep reading rectangles until
+            // you see a LastRect marker" instead of a literal count — we
+            // declared support for it (see setPixelFormatAndEncodings),
+            // so it's a real possibility, not just a spec footnote.
+            let useLastRectSentinel = numRects == 0xFFFF
+            var rectsRead: UInt16 = 0
+            var sawLastRect = false
+            while (useLastRectSentinel && !sawLastRect) || (!useLastRectSentinel && rectsRead < numRects) {
                 let rx = Int(try readU16())
                 let ry = Int(try readU16())
                 let rw = Int(try readU16())
                 let rh = Int(try readU16())
                 let encoding = try readS32()
-                guard encoding == 0 else { throw VNCFramebufferError.unexpectedEncoding(encoding) }
 
-                let rowBytes = rw * Self.bytesPerPixel
-                for row in 0..<rh {
-                    let rowData = try readExact(rowBytes)
-                    let destY = ry + row
-                    guard destY >= 0, destY < framebufferHeight else { continue }
-                    let destOffset = destY * stride + rx * Self.bytesPerPixel
-                    let copyLen = min(rowBytes, stride - rx * Self.bytesPerPixel)
-                    guard copyLen > 0 else { continue }
-                    rowData.withUnsafeBufferPointer { src in
-                        pixels.withUnsafeMutableBufferPointer { dst in
-                            dst.baseAddress!.advanced(by: destOffset).update(from: src.baseAddress!, count: copyLen)
+                switch encoding {
+                case 0:  // Raw
+                    let rowBytes = rw * Self.bytesPerPixel
+                    for row in 0..<rh {
+                        let rowData = try readExact(rowBytes)
+                        let destY = ry + row
+                        guard destY >= 0, destY < framebufferHeight else { continue }
+                        let destOffset = destY * stride + rx * Self.bytesPerPixel
+                        let copyLen = min(rowBytes, stride - rx * Self.bytesPerPixel)
+                        guard copyLen > 0 else { continue }
+                        rowData.withUnsafeBufferPointer { src in
+                            pixels.withUnsafeMutableBufferPointer { dst in
+                                dst.baseAddress!.advanced(by: destOffset).update(from: src.baseAddress!, count: copyLen)
+                            }
                         }
                     }
+                    covered += rw * rh
+                case -223:  // DesktopSize: capability marker, no payload at all.
+                    break
+                case -308:  // ExtendedDesktopSize: 1-byte screen count + 3
+                            // padding, then 16 bytes per screen. Must be
+                            // read and discarded to keep the stream in
+                            // sync even though we don't use the contents.
+                    let screenCount = Int(try readU8())
+                    _ = try readExact(3)
+                    if screenCount > 0 {
+                        _ = try readExact(screenCount * 16)
+                    }
+                case -239:  // Cursor: width*height pixels (current pixel
+                            // format) + a 1-bpp bitmask, ceil(width/8) bytes
+                            // per row.
+                    if rw > 0, rh > 0 {
+                        _ = try readExact(rw * rh * Self.bytesPerPixel)
+                        _ = try readExact(((rw + 7) / 8) * rh)
+                    }
+                case -224:  // LastRect: no payload; ends a 0xFFFF-sentinel batch.
+                    sawLastRect = true
+                default:
+                    throw VNCFramebufferError.unexpectedEncoding(encoding)
                 }
-                covered += rw * rh
+                rectsRead += 1
             }
         }
 
