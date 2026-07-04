@@ -15,49 +15,6 @@ VCS is designed for macOS Setup Assistant automation where accessibility APIs ma
 - Click-safe control centers for interactive glyphs such as checkboxes, radio buttons, toggles, and buttons.
 - Setup Assistant-specific fallbacks for tricky OCR/control cases.
 
-## Project Layout
-
-Typical source files:
-
-```text
-VisionControlScannerApp/
-├── VisionControlScannerApp.swift
-├── ContentView.swift
-├── Models.swift
-├── Utilities.swift
-├── ImageScaling.swift
-├── SceneDefinition.swift
-├── SceneRegistry.swift
-├── VisionControlDetector.swift
-├── CLI.swift
-├── Server.swift
-└── Scenes/
-    ├── AccessibilityScene.swift
-    ├── AnalyticsScene.swift
-    ├── AppleAccountSignInScene.swift
-    ├── AppearanceScene.swift
-    ├── ComputerAccountScene.swift
-    ├── CountryRegionScene.swift
-    ├── CreateMacAccountScene.swift
-    ├── DataPrivacyScene.swift
-    ├── FileVaultScene.swift
-    ├── KeyboardScene.swift
-    ├── LanguageScene.swift
-    ├── LocationServicesScene.swift
-    ├── MigrationScene.swift
-    ├── NoICloudConfirmScene.swift
-    ├── ScreenTimeScene.swift
-    ├── SiriScene.swift
-    ├── SoftwareUpdateScene.swift
-    ├── SpokenLanguageScene.swift
-    ├── TermsAndConditionsScene.swift
-    ├── TimeZoneScene.swift
-    ├── TouchIDScene.swift
-    ├── WelcomeScene.swift
-    ├── WelcomeToYourNewMacScene.swift
-    ├── WiFiScene.swift
-    └── WrittenLanguageScene.swift
-```
 
 ## Main Components
 
