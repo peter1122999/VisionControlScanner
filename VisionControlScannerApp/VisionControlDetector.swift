@@ -35,7 +35,8 @@ final class VisionControlDetector {
     private var workingFullCGImage: CGImage?
     func analyze(
         cgImage: CGImage,
-        maxHeight: Int? = nil
+        maxHeight: Int? = nil,
+        includeChrome: Bool = false
     ) throws -> AnalysisResult {
         let workingFullImage: CGImage
         if let maxHeight {
@@ -54,6 +55,15 @@ final class VisionControlDetector {
             ?? safetyROI(for: workingFullImage)
 
         let workingImage = cropImage(workingFullImage, to: roi) ?? workingFullImage
+        if ProcessInfo.processInfo.environment["VCS_DUMP_WORKING_IMAGE"] != nil {
+            vcsDebug("roi=\(roi) workingImage=\(workingImage.width)x\(workingImage.height)")
+            if let dest = CGImageDestinationCreateWithURL(
+                URL(fileURLWithPath: "/tmp/vcs-working-image.png") as CFURL, "public.png" as CFString, 1, nil
+            ) {
+                CGImageDestinationAddImage(dest, workingImage, nil)
+                CGImageDestinationFinalize(dest)
+            }
+        }
         let roiControls = detectControls(in: workingImage)
 
         let mapped = roiControls.map { control in
@@ -70,7 +80,12 @@ final class VisionControlDetector {
             )
         }
 
-        let scene = classifyScene(controls: mapped)
+        let scene = classifyScene(
+            controls: mapped,
+            imageWidth: CGFloat(workingFullImage.width),
+            imageHeight: CGFloat(workingFullImage.height)
+        )
+        vcsDebug("scene=\(scene?.identifier ?? "nil") layout=\(String(describing: scene?.layout)) mapped-options=\(mapped.filter { $0.type == "radio-option" }.count)")
 
         let listRestructured = recategorizeAsListOptions(mapped, scene: scene)
         let migrationRestructured = recategorizeAsMigrationOptions(listRestructured, scene: scene)
@@ -85,12 +100,18 @@ final class VisionControlDetector {
             imageHeight: CGFloat(workingFullImage.height)
         )
 
+        var withChrome = withHelloButton
+        if includeChrome, let fullRGB = workingFullRGB {
+            withChrome.append(contentsOf: detectDockItems(in: fullRGB))
+            withChrome.append(contentsOf: detectMenuBarChrome(in: fullRGB, fullImage: workingFullImage))
+        }
+
         let imageWidth = CGFloat(workingFullImage.width)
         let imageHeight = CGFloat(workingFullImage.height)
-        let detections = withHelloButton.map {
+        let detections = withChrome.map {
             mapToDetection($0, imageWidth: imageWidth, imageHeight: imageHeight)
         }
-        let summary = buildSummary(controls: withHelloButton, scene: scene)
+        let summary = buildSummary(controls: withChrome, scene: scene)
         return AnalysisResult(detections: detections, summary: summary)
     }
 
@@ -202,7 +223,11 @@ final class VisionControlDetector {
 
     // MARK: - Stage 4a: Scene classification
 
-    private func classifyScene(controls: [DetectedVisionControl]) -> SceneDefinition? {
+    private func classifyScene(
+        controls: [DetectedVisionControl],
+        imageWidth: CGFloat,
+        imageHeight: CGFloat
+    ) -> SceneDefinition? {
         // Checkbox/toggle labels must be part of the haystack: mergeControls
         // consumes the OCR text line INTO the control, so on screens whose only
         // distinctive phrase is a checkbox label ("Enable Ask Siri"), excluding
@@ -219,7 +244,34 @@ final class VisionControlDetector {
             }
             .map { $0.label.lowercased() }
             .joined(separator: " | ")
-        return SceneRegistry.classify(haystack: haystack)
+        if let matched = SceneRegistry.classify(haystack: haystack) {
+            return matched
+        }
+        // Keyword classification needs to read EITHER the cursive greeting
+        // OR the localized Continue verb — on frames where OCR misses both
+        // (measured: happens on ~26% of hello-screen frames, since the
+        // animated cursive text is genuinely hard to read and not every
+        // language's Continue verb is in HelloScene's keyword list), the
+        // scene comes back nil despite the screen still being the hello
+        // screen, which is what "the text does not matter" in the button
+        // click is really asking to route around: fall back to the same
+        // structural signature promoteHelloBottomCenterButton uses — a lone
+        // short text sitting in the fixed bottom-center pill position — as
+        // long as the rest of the screen is otherwise bare (a real Setup
+        // Assistant card has many more text elements: title, subtitle, body
+        // copy, form fields), so this can't mistake a real card screen for
+        // the hello screen just because ITS Continue button also happens to
+        // sit somewhere in the lower half.
+        let textLikeCount = controls.filter { $0.type == "text" || $0.type == "button" }.count
+        guard textLikeCount <= 2 else { return nil }
+        let hasHelloButtonCandidate = controls.contains { control in
+            (control.type == "text" || control.type == "button") &&
+            control.rect.midY >= imageHeight * 0.72 &&
+            abs(control.rect.midX - imageWidth / 2) <= imageWidth * 0.22 &&
+            control.rect.width <= imageWidth * 0.25 &&
+            control.label.count >= 2 && control.label.count <= 24
+        }
+        return hasHelloButtonCandidate ? HelloScene.definition : nil
     }
 
     // MARK: - Stage 4b: List-picker restructuring
@@ -1245,7 +1297,33 @@ guard let srcContext = CGContext(
         var output: [DetectedVisionControl] = []
         for control in controls {
             if control.type == "radio-option" { continue }
-            if control.type == "radio" { continue }
+            if control.type == "radio" {
+                // detectRadioButtons already found a real radio glyph + label
+                // + selection state for this row — normally redundant with
+                // (and superseded by) the row's own "text" entry below, but
+                // when the row's OCR text absorbed a misread leading glyph
+                // (a filled dot read as "•"), the radio's wider union rect
+                // is what survives mergeControls' priority ordering, and the
+                // row's "text" duplicate is dropped — so this is sometimes
+                // the ONLY surviving representation of the row. Keep it
+                // (converted to a proper option) instead of discarding it
+                // outright, as long as it's actually in the option area.
+                guard control.rect.minY > header.rect.maxY - 4,
+                      !control.rect.intersects(header.rect)
+                else { continue }
+                let cleanLabel = control.label
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                output.append(DetectedVisionControl(
+                    type: "radio-option",
+                    label: cleanLabel,
+                    confidence: max(control.confidence, 0.80),
+                    rect: control.rect,
+                    selected: control.selected,
+                    controlCenter: control.controlCenter ?? CGPoint(x: control.rect.midX, y: control.rect.midY),
+                    style: nil
+                ))
+                continue
+            }
             if control.type == "text", optionRects.contains(control.rect) {
                 let selected = migrationOptionLooksSelected(
                     optionRect: control.rect,
@@ -1316,15 +1394,28 @@ guard let srcContext = CGContext(
         guard let rgb = workingFullRGB else { return controls }
 
         let components = findConnectedComponents(in: rgb)
+        // The selection highlight is a thin blue RING around one swatch —
+        // small bounding box, low fill ratio (only the border pixels are
+        // "on", not the interior). Without the upper size bound and fill
+        // ratio cap, this previously matched the desktop wallpaper visible
+        // around the Setup Assistant card instead: a solid (not hollow)
+        // blue/green gradient blob spanning nearly the full image width,
+        // which has far more pixels than the real ring and was winning the
+        // max-by-pixelCount pick (verified live: rect (0,29,1152,691),
+        // fillRatio 0.48, vs. the real selection ring at (293,319,183,144),
+        // fillRatio 0.37 — same screenshot, scene-17-appearance-fresh.png).
         let selection = components
             .filter {
                 let r = $0.rect
                 let aspect = r.width / max(r.height, 1)
                 return $0.blueRatio >= 0.30 &&
                        r.width >= 60 && r.height >= 40 &&
+                       r.width <= 400 && r.height <= 400 &&
+                       $0.fillRatio <= 0.45 &&
                        aspect >= 1.0 && aspect <= 2.0
             }
             .max(by: { $0.pixelCount < $1.pixelCount })
+        vcsDebug("thumbnailPicker selection rect=\(String(describing: selection?.rect)) pixelCount=\(String(describing: selection?.pixelCount)) blueRatio=\(String(describing: selection?.blueRatio))")
 
         let texts = controls.filter { $0.type == "text" }
         guard let promptBottom = texts.map({ $0.rect.maxY }).max() else { return controls }
@@ -1358,13 +1449,41 @@ guard let srcContext = CGContext(
                 } else {
                     selected = false
                 }
+                // The clickable thumbnail is the swatch IMAGE sitting above
+                // this caption, not the caption text itself — clicking the
+                // "Auto"/"Light"/"Dark" label does not change the selection
+                // (verified live: only the swatch responds). `selection`
+                // (found above via the blue selection-border connected
+                // component) gives a real detected rect for whichever
+                // swatch is currently selected; every swatch in the row
+                // shares that same size and vertical band, so reuse its
+                // width/height/midY and just re-center on this option's own
+                // label midX to get each swatch's true click target.
+                let swatchRect: CGRect
+                let clickPoint: CGPoint
+                if let sel = selection {
+                    swatchRect = CGRect(
+                        x: control.rect.midX - sel.rect.width / 2,
+                        y: sel.rect.minY,
+                        width: sel.rect.width,
+                        height: sel.rect.height
+                    )
+                    clickPoint = CGPoint(x: swatchRect.midX, y: swatchRect.midY)
+                } else {
+                    // No selection highlight detected (shouldn't normally
+                    // happen — one option is always pre-selected) — fall
+                    // back to the label itself rather than guessing a
+                    // swatch position with no reference geometry at all.
+                    swatchRect = control.rect
+                    clickPoint = CGPoint(x: control.rect.midX, y: control.rect.midY)
+                }
                 output.append(DetectedVisionControl(
                     type: "radio-option",
                     label: control.label,
                     confidence: max(control.confidence, 0.85),
-                    rect: control.rect,
+                    rect: swatchRect,
                     selected: selected,
-                    controlCenter: CGPoint(x: control.rect.midX, y: control.rect.midY),
+                    controlCenter: clickPoint,
                     style: nil
                 ))
                 continue
@@ -1372,6 +1491,72 @@ guard let srcContext = CGContext(
             output.append(control)
         }
         return output
+    }
+
+    /// Re-OCRs `rect` (full-image pixel space) directly and joins every line
+    /// found, top to bottom. Used to recover multi-line content (a title +
+    /// sublabel pair) that only survived the detection pipeline as a single
+    /// merged control with one line's worth of label text.
+    private func rereadFullLabel(for rect: CGRect) -> String? {
+        guard let fullImage = workingFullCGImage else { return nil }
+        let bounds = CGRect(x: 0, y: 0, width: fullImage.width, height: fullImage.height)
+        let cropRect = rect.insetBy(dx: -4, dy: -4).integral.intersection(bounds)
+        guard cropRect.width >= 10, cropRect.height >= 10,
+              let crop = fullImage.cropping(to: cropRect)
+        else { return nil }
+        let lines = recognizeText(in: crop)
+            .sorted { $0.rect.minY < $1.rect.minY }
+            .map { $0.text.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !lines.isEmpty else { return nil }
+        return lines.joined(separator: " ")
+    }
+
+    /// Converts controls of the given types to plain "text" instead of
+    /// dropping them, and strips a leading bullet/checkmark glyph that a
+    /// misdetected checkbox/radio sometimes carries in its label (see
+    /// stripLeadingGlyphLabels — that pass runs on raw OCR text, before this
+    /// control was ever mis-typed, so it doesn't help here). Skips generic
+    /// positional fallback labels ("checkbox-3", "Toggle") since those
+    /// carry no real information worth keeping as text.
+    private func demoteFalsePositiveControls(
+        _ controls: [DetectedVisionControl],
+        types: Set<String>
+    ) -> [DetectedVisionControl] {
+        let positionalFallback = try! NSRegularExpression(pattern: "^(checkbox|toggle|radio)(-\\d+)?$", options: .caseInsensitive)
+        return controls.compactMap { control -> DetectedVisionControl? in
+            guard types.contains(control.type) else { return control }
+            var label = control.label.trimmingCharacters(in: .whitespacesAndNewlines)
+            while let first = label.first, !first.isLetter, !first.isNumber {
+                label.removeFirst()
+                label = label.trimmingCharacters(in: .whitespaces)
+            }
+            let range = NSRange(label.startIndex..., in: label)
+            guard !label.isEmpty,
+                  positionalFallback.firstMatch(in: label, range: range) == nil
+            else { return nil }
+            // The misdetected glyph's bounding box is often taller than the
+            // one label line nearestLabelToRight/nearestLabelLeftOrRight
+            // happened to grab (Written and Spoken Languages' row icons are
+            // vertically centered against a title+SUBLABEL pair, e.g.
+            // "Preferred Languages" / "English (US)") — the sublabel line
+            // never became its own surviving control (mergeControls dropped
+            // it as a lower-priority duplicate of this wider rect). Re-OCR
+            // the full rect directly so that second line comes back too,
+            // instead of silently staying lost.
+            if let recovered = rereadFullLabel(for: control.rect), recovered.count > label.count {
+                label = recovered
+            }
+            return DetectedVisionControl(
+                type: "text",
+                label: label,
+                confidence: control.confidence,
+                rect: control.rect,
+                selected: nil,
+                controlCenter: nil,
+                style: nil
+            )
+        }
     }
 
     private func applySceneFilter(
@@ -1394,10 +1579,20 @@ guard let srcContext = CGContext(
         case .infoCardGrid,
              .infoWithContinue,
              .agreement:
-            layoutFiltered = controls.filter {
-                $0.type != "radio" && $0.type != "checkbox" &&
-                $0.type != "toggle" && $0.type != "textfield"
-            }
+            // Demote rather than drop: on a read-only info screen, a
+            // "radio"/"toggle"/"checkbox" is never real — it's always a
+            // decorative row icon (a globe/keyboard/mic glyph) that the
+            // generic pixel detectors mistook for an interactive control,
+            // absorbing the row's real label text into its union rect in
+            // the process (Written and Spoken Languages: "Preferred
+            // Languages" behind a misdetected radio, "Input Sources" behind
+            // a misdetected toggle). A plain filter, as used elsewhere,
+            // would silently delete that text along with the bogus control;
+            // demoting it to type "text" keeps the information while still
+            // removing the wrong interactive classification.
+            layoutFiltered = demoteFalsePositiveControls(
+                controls, types: ["radio", "checkbox", "toggle", "textfield"]
+            )
         case .checkboxList:
             layoutFiltered = controls.filter {
                 $0.type != "radio" && $0.type != "toggle" &&
@@ -1755,7 +1950,7 @@ guard let srcContext = CGContext(
         let rgb = makeRGBImage(from: image)
 
         let labels = dropChevronOCRGarbage(
-            labels: rawLabels,
+            labels: stripLeadingGlyphLabels(rawLabels),
             imageWidth: image.width,
             imageHeight: image.height
         )
@@ -2350,7 +2545,18 @@ guard let srcContext = CGContext(
         } ?? [])
             .sorted { $0.rect.minY < $1.rect.minY }
         vcsDebug("chevNav column=\(column.count) clusters=\(clusters.map { $0.count })")
-        guard column.count >= 2 else { return [] }
+        // Require 3+, not 2: this whole detector runs unconditionally on
+        // EVERY screen (no scene gating — it can't know the scene yet), and
+        // is already documented as running near the noise floor. Two
+        // "column" points give exactly one gap value to check, which can't
+        // distinguish a genuine uniform row pitch from two unrelated stray
+        // edge-artifacts that happen to land in the same x-band by chance —
+        // that's what synthesized phantom "FileVault keep"/"forget your f"
+        // options from two coincidental glyphs on the FileVault confirm
+        // modal (which has no real nav rows at all). Three points give two
+        // gaps, so the uniform-pitch check below actually has something to
+        // cross-verify against. Age Range's real 3-row case is unaffected.
+        guard column.count >= 3 else { return [] }
 
         // The column must be spaced like stacked rows, not clustered curves within
         // a single icon or scattered text strokes: EVERY consecutive vertical gap
@@ -2429,6 +2635,44 @@ guard let srcContext = CGContext(
     }
 
     // MARK: - Chevron OCR garbage filter
+
+    /// Vision sometimes reads a control's own glyph — a filled radio dot, a
+    /// checkmark, a button's rounded-corner antialiasing — as a leading
+    /// bullet/punctuation CHARACTER prepended to the real text on the same
+    /// line ("• From a Mac, Time Machine, or startup disk", "• Continue").
+    /// That inflates the label's bounding box leftward to cover the glyph,
+    /// which breaks anything doing GEOMETRIC reasoning relative to the box —
+    /// concretely, it made `nearestLabelToRight` reject the selected Migration
+    /// Assistant row's own real label (its box now started AT the radio
+    /// circle instead of to its right) and fall through to the next row's
+    /// label instead, corrupting both rows. Text-only cleanup elsewhere
+    /// (classifyTextType, cleanButtonLabel) fixes what gets DISPLAYED but
+    /// not this geometric side effect, so it needs to happen here, early,
+    /// on the rect itself. Assumes a leading icon-glyph occupies roughly one
+    /// line-height of width — a reasonable proxy since these misreads are
+    /// icons, not thin letterforms, and the exact width doesn't need to be
+    /// precise, just enough to clear position-based "is this to the right
+    /// of X" gates.
+    private func stripLeadingGlyphLabels(_ labels: [TextLabel]) -> [TextLabel] {
+        labels.map { label in
+            var text = label.text
+            var stripped = 0
+            while let first = text.first, !first.isLetter, !first.isNumber {
+                text.removeFirst()
+                stripped += 1
+            }
+            text = text.trimmingCharacters(in: .whitespaces)
+            guard stripped > 0, !text.isEmpty else { return label }
+            let shift = min(label.rect.height, label.rect.width * 0.4)
+            let newRect = CGRect(
+                x: label.rect.minX + shift,
+                y: label.rect.minY,
+                width: max(1, label.rect.width - shift),
+                height: label.rect.height
+            )
+            return TextLabel(text: text, confidence: label.confidence, rect: newRect)
+        }
+    }
 
     private func dropChevronOCRGarbage(
         labels: [TextLabel],
@@ -2632,6 +2876,16 @@ guard let srcContext = CGContext(
                 normalized = String(normalized[..<lastSpace])
             }
         }
+        // A stray leading glyph — OCR sometimes reads a button's rounded-corner
+        // antialiasing or an adjacent icon as a bullet/punctuation character
+        // ("• Continue" for FileVault's plain blue Continue pill) — defeats
+        // the exact-match lookups below entirely. Strip any leading
+        // non-letter run before matching; real button labels never start
+        // with punctuation.
+        while let first = normalized.first, !first.isLetter {
+            normalized.removeFirst()
+            normalized = normalized.trimmingCharacters(in: .whitespaces)
+        }
         if isKnownMacOSDropdownButtonLabel(normalized) {
             return "button"
         }
@@ -2643,7 +2897,7 @@ guard let srcContext = CGContext(
             "create", "start", "stop", "retry", "disagree",
             "not now", "browse", "don't use", "dont use",
             "turn on", "turn off", "set up later",
-            "only download automatically"
+            "only download automatically", "customize settings"
         ]
         if exactButtons.contains(normalized) {
             return "button"
@@ -2677,7 +2931,8 @@ guard let srcContext = CGContext(
         var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         text = text.replacingOccurrences(of: #"\.{4,}"#, with: "…", options: .regularExpression)
         while let first = text.unicodeScalars.first,
-              CharacterSet.symbols.contains(first) || isPrivateUseUnicodeScalar(first) {
+              CharacterSet.symbols.contains(first) || CharacterSet.punctuationCharacters.contains(first) ||
+              isPrivateUseUnicodeScalar(first) {
             text.removeFirst()
             text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         }
@@ -2820,9 +3075,13 @@ guard let srcContext = CGContext(
         }
 
         let rects = pairRunsByColumn(horizontalRuns, image: image)
+        vcsDebug("textfield candidate rects=\(rects)")
 
         let controls = rects.compactMap { rect -> DetectedVisionControl? in
-            guard textFieldInteriorLooksValid(rect, image: image) else { return nil }
+            guard textFieldInteriorLooksValid(rect, image: image) else {
+                vcsDebug("  rejected (interior invalid) rect=\(rect)")
+                return nil
+            }
             let label = bestTextFieldLabel(for: rect, labels: labels)
             let detectedLabel = label?.text.trimmingCharacters(in: .whitespacesAndNewlines)
             let finalLabel = (detectedLabel?.isEmpty == false) ? detectedLabel! : ""
@@ -2844,6 +3103,27 @@ guard let srcContext = CGContext(
 
         let aligned = alignSiblingTextFieldsByRow(controls)
         let deduped = dedupeTextFieldsKeepingSiblings(aligned)
+            .filter { field in
+                // A real text field's interior holds at most one line of
+                // typed/placeholder text. A candidate whose rect overlaps 2+
+                // SEPARATE OCR labels is really straddling a multi-line
+                // block — a bold title sitting directly above body copy, or
+                // a paragraph's own line wrap — which a text-field-border
+                // run can spuriously match across (Migration Assistant:
+                // "Transfer Your Data to This Mac" + the body paragraph's
+                // first line). Checked here, AFTER the detector's own
+                // internal sibling-alignment/dedup rather than per raw
+                // candidate: rejecting earlier removed sibling candidates
+                // that a genuinely-bad detection (an "Other Sign-In
+                // Options" dropdown border misread) would normally have
+                // been deduped against, leaving it as the sole survivor
+                // instead of being absorbed like its neighbors.
+                let overlapping = labels.filter { intersectionRatio($0.rect, field.rect) > 0.15 }
+                if overlapping.count > 1 {
+                    vcsDebug("  rejected (spans \(overlapping.count) labels) rect=\(field.rect)")
+                }
+                return overlapping.count <= 1
+            }
         return assignPositionalLabels(deduped)
     }
     /// If two textfields belong to the same visual row (their vertical
@@ -3332,11 +3612,13 @@ guard let srcContext = CGContext(
                            ) else { continue }
                            let selected = radioLooksSelected(image: image, rect: rect)
                            let glyphCenter = CGPoint(x: rect.midX, y: rect.midY)
+                           let unionRect = rect.union(label.rect).insetBy(dx: -8, dy: -6)
+                           vcsDebug("radio candidate glyphRect=\(rect) label='\(label.text)' labelRect=\(label.rect) unionRect=\(unionRect) selected=\(selected)")
                            output.append(DetectedVisionControl(
                                type: "radio",
                                label: label.text,
                                confidence: max(label.confidence, 0.72),
-                               rect: rect.union(label.rect).insetBy(dx: -8, dy: -6),
+                               rect: unionRect,
                                selected: selected,
                                controlCenter: glyphCenter,
                                style: nil
@@ -3381,6 +3663,7 @@ guard let srcContext = CGContext(
                                of: rect, labels: labels,
                                maxDistance: 320, verticalTolerance: 36
                            )
+                           vcsDebug("toggle candidate rect=\(rect) fillRatio=\(component.fillRatio) selected=\(selected) label=\(label?.text ?? "nil") labelRect=\(label?.rect ?? .zero)")
                            let glyphCenter = CGPoint(x: rect.midX, y: rect.midY)
                            output.append(DetectedVisionControl(
                                type: "toggle",
@@ -3445,6 +3728,12 @@ guard let srcContext = CGContext(
                                minX: Int(rect.minX.rounded()), minY: Int(rect.minY.rounded()),
                                maxX: Int(rect.maxX.rounded()), maxY: Int(rect.maxY.rounded())
                            ) else { continue }
+                           guard borderBlueCoverage(
+                               image: image,
+                               minX: Int(rect.minX.rounded()), minY: Int(rect.minY.rounded()),
+                               maxX: Int(rect.maxX.rounded()), maxY: Int(rect.maxY.rounded()),
+                               inset: 2
+                           ) >= 0.82 else { continue }
                            glyphRects.append((rect, true, 0.84))
                        }
                        // B) Dedicated full-frame scans. These MUST be outside the component loop;
@@ -3460,6 +3749,7 @@ guard let srcContext = CGContext(
                        var fallbackIndex = 0
                        for glyph in glyphs {
                            let labelInfo = checkboxLabel(for: glyph.rect, labels: labels)
+                           vcsDebug("checkbox glyph rect=\(glyph.rect) filled=\(glyph.filled) label=\(labelInfo?.text ?? "nil")")
                            // Every real filled (checked) Setup Assistant checkbox has its
                            // label text directly to the right. Filled candidates with no
                            // such text are windows into decorative artwork — the Location
@@ -3701,6 +3991,17 @@ guard let srcContext = CGContext(
                 image: image, minX: minX, minY: minY, maxX: maxX, maxY: maxY
             ) else { continue }
 
+            // Reject circular blobs — a round icon glyph (e.g. one head of the
+            // two-person "family sharing" icon used on Apple Account/Migration
+            // screens) can pass the blue/white ratio and even the corner-blue
+            // gates below (a circle inscribed in a square hits inset-3 corners
+            // while leaving the true corners uncovered), since real checkboxes
+            // are rounded SQUARES, not circles. The component-based filled path
+            // already has this check; the sliding-window scan didn't.
+            if looksCircular(rect: CGRect(x: minX, y: minY, width: size, height: size), in: image) {
+                continue
+            }
+
             // 3+ of the 4 inset corners must be blue. Sampling 3 px in to
             // safely clear the rounded-corner antialias band.
             let inset = 3
@@ -3716,6 +4017,22 @@ guard let srcContext = CGContext(
                 if p.isSystemBlue || p.isBlue { blueCorners += 1 }
             }
             guard blueCorners >= 3 else { continue }
+
+            // A real filled checkbox is a solid rounded square: its border is
+            // blue almost the entire way around (just the rounded-corner
+            // antialias band excepted). Multi-shape icons that happen to
+            // pass the 4-corner sample (e.g. the two-person "family sharing"
+            // glyph, whose two head/shoulder blobs can each individually
+            // land blue at all 4 corners of a tightly-fit window) have a
+            // WHITE GAP somewhere along that border — between the two
+            // figures, or in the margin around a single circular head — that
+            // a 4-point corner sample can miss entirely. Sampling the full
+            // inset perimeter catches it.
+            let borderCoverage = borderBlueCoverage(
+                image: image, minX: minX, minY: minY, maxX: maxX, maxY: maxY, inset: 2
+            )
+            vcsDebug("scanFilledCheckboxAt candidate (\(minX),\(minY))-(\(maxX),\(maxY)) borderCoverage=\(borderCoverage)")
+            guard borderCoverage >= 0.82 else { continue }
 
             // Reject windows carved out of a larger blue shape — a saturated-blue
             // primary button ("Don't Use"), the blue menu bar, etc. A real filled
@@ -3787,6 +4104,30 @@ guard let srcContext = CGContext(
         let leftRatio = leftTotal > 0 ? Double(leftBlue) / Double(leftTotal) : 1
         let rightRatio = rightTotal > 0 ? Double(rightBlue) / Double(rightTotal) : 1
         return leftRatio <= 0.5 && rightRatio <= 0.5
+    }
+
+    /// Fraction of pixels along the INSET perimeter (all 4 edges, not just
+    /// corners) of the given square that read as blue. A filled checkbox's
+    /// border is blue essentially all the way around; a multi-blob icon that
+    /// happens to hit blue at all 4 corner samples usually still has a white
+    /// gap somewhere along an edge between its blobs.
+    private func borderBlueCoverage(
+        image: RGBImage, minX: Int, minY: Int, maxX: Int, maxY: Int, inset: Int
+    ) -> Double {
+        var blue = 0, total = 0
+        func sample(_ x: Int, _ y: Int) {
+            guard let p = image.pixel(x: x, y: y) else { return }
+            total += 1
+            if p.isSystemBlue || p.isBlue { blue += 1 }
+        }
+        let ix0 = minX + inset, ix1 = maxX - inset
+        let iy0 = minY + inset, iy1 = maxY - inset
+        guard ix1 > ix0, iy1 > iy0 else { return 0 }
+        var x = ix0
+        while x <= ix1 { sample(x, iy0); sample(x, iy1); x += 1 }
+        var y = iy0
+        while y <= iy1 { sample(ix0, y); sample(ix1, y); y += 1 }
+        return total > 0 ? Double(blue) / Double(total) : 0
     }
 
     /// Fraction of pixels in a thin ring `gap` px outside the given square that read
@@ -4088,8 +4429,24 @@ guard let srcContext = CGContext(
                    private func dedupe(_ controls: [DetectedVisionControl]) -> [DetectedVisionControl] {
                        var output: [DetectedVisionControl] = []
                        for control in controls {
-                           let duplicate = output.contains {
-                               intersectionRatio($0.rect, control.rect) > 0.55
+                           let duplicate = output.contains { existing in
+                               guard intersectionRatio(existing.rect, control.rect) > 0.55 else { return false }
+                               // Two distinct glyphs in adjacent, tightly-packed rows (e.g.
+                               // toggle switches in a Settings list ~25px apart) can still
+                               // end up with >55% *rect* overlap once each is unioned with
+                               // its own label text (checkbox/radio/toggle detectors all
+                               // union the glyph rect with nearby OCR text before this
+                               // dedupe runs) — even though the glyphs themselves are
+                               // nowhere near each other. controlCenter is always set to
+                               // the raw glyph's own center (unaffected by the label
+                               // union), so require it to also be close before treating
+                               // this as the same control detected twice rather than two
+                               // distinct real controls that happen to sit close together.
+                               // Falls back to rect-only when a center is missing.
+                               guard let ec = existing.controlCenter, let cc = control.controlCenter else {
+                                   return true
+                               }
+                               return hypot(ec.x - cc.x, ec.y - cc.y) < 20
                            }
                            if !duplicate { output.append(control) }
                        }
@@ -4103,4 +4460,480 @@ guard let srcContext = CGContext(
                        let smallerArea = min(a.width * a.height, b.width * b.height)
                        return intersectionArea / max(smallerArea, 1)
                    }
+
+    // MARK: - Desktop chrome (menu bar + Dock)
+    //
+    // Opt-in (analyze(..., includeChrome: true)): identifies the guest OS's
+    // own menu bar (Apple menu, active app's menu titles, menu-bar-extra
+    // icons, clock) and Dock icons, ANYWHERE in the full screenshot — not
+    // just inside a Setup Assistant card. This exists so a Packer post-setup
+    // step can click the VM's own Spotlight/Control Center/Dock icons
+    // in-window, instead of host-global hotkeys (cmd+space, cmd+q) that the
+    // cgtool backend can't deliver into the guest (they're intercepted by the
+    // host before they ever reach the VM window).
+    //
+    // Both detectors are calibrated against a real captured VM desktop
+    // (~/Desktop/AI/ui-Auto-test/ui-artifacts/macos26_local/scene-19-desktop.png,
+    // 1280x800, 20 pinned Dock icons + separator + Downloads stack + Trash,
+    // menu bar showing Finder/File/Edit/View/Go/Window/Help + Spotlight +
+    // Control Center + clock) — see project memory for the reference frame
+    // and pixel measurements. WiFi/Battery/Bluetooth menu-bar-extra icons are
+    // UNVERIFIED: this dev VM has no network/battery hardware, so those
+    // icons never appear in the calibration frame. They still get detected
+    // and clicked correctly via the generic "menu-extra-N" fallback below —
+    // only the specific "WiFi"/"Battery" NAME isn't attempted.
+
+    /// Local high-pass response at (x,y): |pixel − boxBlur(pixel)|, summed
+    /// over channels, sparsely sampled. HIGH = sharp local detail (an icon
+    /// glyph's edges/color transitions); LOW = smooth (translucent glass
+    /// panel background, blurred backdrop showing through it). This is what
+    /// makes Dock/menu-extra icon segmentation possible over ARBITRARY
+    /// wallpaper: color-based background matching (used elsewhere in this
+    /// file for the flat-white Setup Assistant card) doesn't work here
+    /// because the Dock/menu-bar backgrounds take on whatever photo is
+    /// behind them — but they're always more blurred than raw wallpaper,
+    /// and icons are always sharper than either.
+    private func chromeHipassEnergy(x: Int, y: Int, in image: RGBImage) -> Int {
+        var sr = 0, sg = 0, sb = 0, n = 0
+        let radius = 4
+        var dy = -radius
+        while dy <= radius {
+            var dx = -radius
+            while dx <= radius {
+                let sx = min(max(x + dx, 0), image.width - 1)
+                let sy = min(max(y + dy, 0), image.height - 1)
+                if let p = image.pixel(x: sx, y: sy) {
+                    sr += Int(p.r); sg += Int(p.g); sb += Int(p.b)
+                    n += 1
+                }
+                dx += 2
+            }
+            dy += 2
+        }
+        guard n > 0, let center = image.pixel(x: x, y: y) else { return 0 }
+        return abs(Int(center.r) - sr / n) + abs(Int(center.g) - sg / n) + abs(Int(center.b) - sb / n)
+    }
+
+    /// Connected-component scan for "ink" (chromeHipassEnergy above a
+    /// threshold) within a small region — used for menu-bar-extra icons
+    /// (Spotlight, Control Center, ...) once OCR words have been masked out.
+    private func chromeInkBlobs(
+        in image: RGBImage,
+        region: CGRect,
+        threshold: Int = 35,
+        minCount: Int = 8
+    ) -> [(rect: CGRect, pixelCount: Int)] {
+        let minX = max(0, Int(region.minX.rounded()))
+        let maxX = min(image.width - 1, Int(region.maxX.rounded()))
+        let minY = max(0, Int(region.minY.rounded()))
+        let maxY = min(image.height - 1, Int(region.maxY.rounded()))
+        guard maxX > minX, maxY > minY else { return [] }
+
+        var visited = [Bool](repeating: false, count: image.width * image.height)
+        func idx(_ x: Int, _ y: Int) -> Int { y * image.width + x }
+        func isInk(_ x: Int, _ y: Int) -> Bool {
+            chromeHipassEnergy(x: x, y: y, in: image) > threshold
+        }
+
+        var blobs: [(rect: CGRect, pixelCount: Int)] = []
+        for y in minY...maxY {
+            for x in minX...maxX {
+                if visited[idx(x, y)] { continue }
+                visited[idx(x, y)] = true
+                guard isInk(x, y) else { continue }
+                var stack = [(x, y)]
+                var bx0 = x, bx1 = x, by0 = y, by1 = y, count = 0
+                while let (cx, cy) = stack.popLast() {
+                    guard isInk(cx, cy) else { continue }
+                    count += 1
+                    bx0 = min(bx0, cx); bx1 = max(bx1, cx)
+                    by0 = min(by0, cy); by1 = max(by1, cy)
+                    for (nx, ny) in [(cx+1,cy),(cx-1,cy),(cx,cy+1),(cx,cy-1),
+                                      (cx+1,cy+1),(cx-1,cy-1),(cx+1,cy-1),(cx-1,cy+1)] {
+                        guard nx >= minX, ny >= minY, nx <= maxX, ny <= maxY else { continue }
+                        if visited[idx(nx, ny)] { continue }
+                        visited[idx(nx, ny)] = true
+                        if isInk(nx, ny) { stack.append((nx, ny)) }
+                    }
+                }
+                guard count >= minCount else { continue }
+                blobs.append((
+                    rect: CGRect(x: bx0, y: by0, width: bx1 - bx0 + 1, height: by1 - by0 + 1),
+                    pixelCount: count
+                ))
+            }
+        }
+        return blobs
+    }
+
+    // MARK: - Dock
+
+    /// Finds Dock icons by locating the icon row's Y-band (row-wise ink
+    /// density plateau near the bottom of the screen) and then slicing that
+    /// band into per-icon X-segments (column-wise ink runs). Deliberately
+    /// does NOT try to identify the Dock's translucent panel itself — only
+    /// the icons sitting on it, which is what's clickable. Finder is always
+    /// first and Trash always last in a default Dock, so those two get named
+    /// confidently; everything else is positional ("dock-item-N") since
+    /// identifying arbitrary pinned apps by icon artwork is out of scope.
+    private func detectDockItems(in image: RGBImage) -> [DetectedVisionControl] {
+        let w = image.width, h = image.height
+        guard w > 20, h > 20 else { return [] }
+
+        let searchTop = Int(Double(h) * 0.72)
+        let searchBottom = h - 1
+        guard searchBottom > searchTop else { return [] }
+
+        var rowIsIconLike = [Bool](repeating: false, count: h)
+        for y in searchTop...searchBottom {
+            var count = 0
+            for x in stride(from: 0, to: w, by: 1) {
+                if chromeHipassEnergy(x: x, y: y, in: image) > 35 { count += 1 }
+            }
+            rowIsIconLike[y] = Double(count) / Double(w) > 0.35
+        }
+
+        var bestStart = -1, bestLen = 0
+        var curStart = -1, curLen = 0
+        for y in searchTop...searchBottom {
+            if rowIsIconLike[y] {
+                if curStart < 0 { curStart = y }
+                curLen += 1
+            } else {
+                if curLen > bestLen { bestStart = curStart; bestLen = curLen }
+                curStart = -1; curLen = 0
+            }
+        }
+        if curLen > bestLen { bestStart = curStart; bestLen = curLen }
+        guard bestLen >= 14, bestStart >= 0 else { return [] }
+        let bandTop = bestStart
+        let bandBottom = bestStart + bestLen - 1
+
+        var colHasContent = [Bool](repeating: false, count: w)
+        for x in 0..<w {
+            var count = 0
+            for y in bandTop...bandBottom {
+                if chromeHipassEnergy(x: x, y: y, in: image) > 35 { count += 1 }
+            }
+            colHasContent[x] = count > 3
+        }
+
+        var segments: [(Int, Int)] = []
+        var segStart: Int? = nil
+        for x in 0..<w {
+            if colHasContent[x] {
+                if segStart == nil { segStart = x }
+            } else if let s = segStart {
+                segments.append((s, x - 1))
+                segStart = nil
+            }
+        }
+        if let s = segStart { segments.append((s, w - 1)) }
+
+        // Merge segments separated by a very small gap — a low-detail column
+        // inside a flat-color icon (e.g. a solid green Phone circle's
+        // midline) can momentarily dip below the ink threshold.
+        var merged: [(Int, Int)] = []
+        for seg in segments {
+            if let last = merged.last, seg.0 - last.1 <= 4 {
+                merged[merged.count - 1] = (last.0, seg.1)
+            } else {
+                merged.append(seg)
+            }
+        }
+
+        // Drop fragments too narrow to be a real icon — wallpaper detail
+        // beyond the Dock's true extent, or the 1px separator hairline.
+        let iconHeight = bandBottom - bandTop + 1
+        let candidates = merged.filter { $0.1 - $0.0 + 1 >= max(16, iconHeight / 3) }
+        guard !candidates.isEmpty else { return [] }
+
+        var output: [DetectedVisionControl] = []
+        for (i, seg) in candidates.enumerated() {
+            let rect = CGRect(
+                x: CGFloat(seg.0), y: CGFloat(bandTop),
+                width: CGFloat(seg.1 - seg.0 + 1), height: CGFloat(iconHeight)
+            )
+            let label: String
+            if i == 0 {
+                label = "Finder"
+            } else if i == candidates.count - 1 {
+                label = "Trash"
+            } else {
+                label = "dock-item-\(i)"
+            }
+            output.append(DetectedVisionControl(
+                type: "dock-item",
+                label: label,
+                confidence: 0.7,
+                rect: rect,
+                selected: nil,
+                controlCenter: CGPoint(x: rect.midX, y: rect.midY),
+                style: nil
+            ))
+        }
+        return output
+    }
+
+    // MARK: - Menu bar
+
+    /// Re-recognizes text within `region` (full-image pixel space) and
+    /// returns one TextLabel PER WORD, using Vision's per-substring
+    /// `boundingBox(for:)` API. The detector-wide `recognizeText()` merges
+    /// adjacent words/lines together for label-association purposes
+    /// elsewhere in this file (e.g. "Finder File Edit View Go Window Help"
+    /// comes back as a single glued line) — menu bar items need one control
+    /// per word/icon, so this bypasses that merge entirely.
+    private func recognizeWords(in fullImage: CGImage, region: CGRect) -> [TextLabel] {
+        let bounds = CGRect(x: 0, y: 0, width: fullImage.width, height: fullImage.height)
+        let cropRect = region.integral.intersection(bounds)
+        guard cropRect.width >= 4, cropRect.height >= 4,
+              let crop = fullImage.cropping(to: cropRect)
+        else { return [] }
+
+        var output: [TextLabel] = []
+        let request = VNRecognizeTextRequest { request, _ in
+            guard let observations = request.results as? [VNRecognizedTextObservation] else { return }
+            let cw = CGFloat(crop.width), ch = CGFloat(crop.height)
+            for observation in observations {
+                guard let candidate = observation.topCandidates(1).first else { continue }
+                let full = candidate.string
+                var cursor = full.startIndex
+                while cursor < full.endIndex {
+                    while cursor < full.endIndex, full[cursor].isWhitespace {
+                        cursor = full.index(after: cursor)
+                    }
+                    guard cursor < full.endIndex else { break }
+                    var wordEnd = cursor
+                    while wordEnd < full.endIndex, !full[wordEnd].isWhitespace {
+                        wordEnd = full.index(after: wordEnd)
+                    }
+                    let word = String(full[cursor..<wordEnd])
+                    if let obs = try? candidate.boundingBox(for: cursor..<wordEnd) {
+                        let box = obs.boundingBox
+                        let rect = CGRect(
+                            x: box.minX * cw + cropRect.minX,
+                            y: (1.0 - box.maxY) * ch + cropRect.minY,
+                            width: box.width * cw,
+                            height: box.height * ch
+                        )
+                        output.append(TextLabel(text: word, confidence: Double(candidate.confidence), rect: rect))
+                    }
+                    cursor = wordEnd
+                }
+            }
+        }
+        request.recognitionLevel = .accurate
+        request.usesLanguageCorrection = false
+        request.minimumTextHeight = 0.008
+        let handler = VNImageRequestHandler(cgImage: crop, options: [:])
+        try? handler.perform([request])
+        return output
+    }
+
+    private static let weekdayAbbreviations: Set<String> = [
+        "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"
+    ]
+    private static let monthAbbreviations: Set<String> = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
+    ]
+
+    /// True for a word that UNAMBIGUOUSLY belongs to the menu bar clock/date
+    /// ("Thu", "Jul", "7:30", "PM"): a weekday/month abbreviation, a
+    /// digit-colon-digit time token, or a bare AM/PM. Deliberately excludes
+    /// bare short numbers (the day-of-month, e.g. "2") — Vision sometimes
+    /// misreads a menu-bar-extra icon glyph (Control Center) as a stray
+    /// single digit, which would otherwise get pulled into the clock cluster
+    /// and mask the real icon out of the ink-blob scan below. Bare numbers
+    /// are absorbed separately, only when they sit within the X-span already
+    /// staked out by these unambiguous anchors.
+    private func looksLikeStrongClockAnchor(_ word: String) -> Bool {
+        let trimmed = word.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return false }
+        if Self.weekdayAbbreviations.contains(trimmed) { return true }
+        if Self.monthAbbreviations.contains(trimmed) { return true }
+        let upper = trimmed.uppercased()
+        if upper == "AM" || upper == "PM" { return true }
+        if let colonIdx = trimmed.firstIndex(of: ":"),
+           colonIdx > trimmed.startIndex,
+           trimmed.index(after: colonIdx) < trimmed.endIndex {
+            let before = trimmed[trimmed.index(before: colonIdx)]
+            let after = trimmed[trimmed.index(after: colonIdx)]
+            if before.isNumber, after.isNumber { return true }
+        }
+        return false
+    }
+
+    /// Finds the guest OS's menu bar (Apple menu, active app's menu titles,
+    /// menu-bar-extra icons, and clock) anywhere in the top of the image.
+    /// Anchored on the clock, since it's the one element guaranteed to be
+    /// present on every macOS screen (Setup Assistant included) and OCRs
+    /// reliably — everything else is positioned relative to it.
+    private func detectMenuBarChrome(
+        in image: RGBImage,
+        fullImage: CGImage
+    ) -> [DetectedVisionControl] {
+        let w = image.width, h = image.height
+        guard w > 20, h > 20 else { return [] }
+
+        let topBand = CGRect(x: 0, y: 0, width: CGFloat(w), height: CGFloat(h) * 0.12)
+        let words = recognizeWords(in: fullImage, region: topBand)
+        guard !words.isEmpty else { return [] }
+
+        let anchorWords = words.filter { looksLikeStrongClockAnchor($0.text) }
+        guard !anchorWords.isEmpty else { return [] }
+        // The clock sits alone at the right edge of the bar; other anchors
+        // (unlikely in this OCR band, but be defensive) could in principle
+        // match too, so only trust a cluster that's actually clustered
+        // together on one line.
+        let clockY = anchorWords.map { $0.rect.midY }.sorted()[anchorWords.count / 2]
+        var clockCluster = anchorWords.filter { abs($0.rect.midY - clockY) <= 8 }
+        guard !clockCluster.isEmpty else { return [] }
+        // Absorb the day-of-month number (e.g. "2" in "Thu Jul 2  7:30 PM")
+        // now that we have a trustworthy anchor span to require it sit
+        // within — this is what keeps a stray icon-glyph misread (e.g. "8"
+        // for the Control Center icon, well to the left of "Thu") out.
+        let anchorMinX = clockCluster.map { $0.rect.minX }.min()!
+        let anchorMaxX = clockCluster.map { $0.rect.maxX }.max()!
+        let dayWords = words.filter {
+            abs($0.rect.midY - clockY) <= 8 &&
+            $0.text.count <= 2 && $0.text.allSatisfy(\.isNumber) &&
+            $0.rect.minX >= anchorMinX && $0.rect.maxX <= anchorMaxX
+        }
+        clockCluster.append(contentsOf: dayWords)
+
+        let barTop = clockCluster.map { $0.rect.minY }.min()! - 4
+        let barBottom = clockCluster.map { $0.rect.maxY }.max()! + 4
+        let clockRect = clockCluster.reduce(clockCluster[0].rect) { $0.union($1.rect) }
+        let clockLabel = clockCluster
+            .sorted { $0.rect.minX < $1.rect.minX }
+            .map { $0.text }
+            .joined(separator: " ")
+
+        var output: [DetectedVisionControl] = []
+        output.append(DetectedVisionControl(
+            type: "menubar-item",
+            label: "Clock",
+            confidence: 0.9,
+            rect: clockRect.insetBy(dx: -4, dy: -3),
+            selected: nil,
+            controlCenter: CGPoint(x: clockRect.midX, y: clockRect.midY),
+            style: nil
+        ))
+        _ = clockLabel // (available if callers ever want the literal date/time text)
+
+        // Apple menu: always the leftmost item, position-anchored — the
+        // glyph doesn't OCR reliably enough to locate any other way.
+        let appleRect = CGRect(x: 4, y: barTop, width: 36, height: barBottom - barTop)
+        output.append(DetectedVisionControl(
+            type: "menubar-item",
+            label: "Apple",
+            confidence: 0.75,
+            rect: appleRect,
+            selected: nil,
+            controlCenter: CGPoint(x: appleRect.midX, y: appleRect.midY),
+            style: nil
+        ))
+
+        // App menu titles: every OTHER word on the bar's line, left of the
+        // clock cluster, at least 2 characters (drops single-character
+        // OCR misreads of menu-extra icon glyphs, e.g. a magnifying glass
+        // sometimes reads as a stray "Q" — Vision READS these as text, but
+        // they're icons, not menu titles, and must NOT be treated as
+        // "explained by OCR" below or the real icon underneath gets masked
+        // out of the ink-blob scan).
+        let barWords = words.filter { abs($0.rect.midY - clockY) <= 10 }
+        let titleWords = barWords
+            .filter { word in !clockCluster.contains(where: { $0.rect == word.rect }) }
+            .filter { $0.rect.minX > appleRect.maxX }
+            .filter { $0.rect.maxX < clockRect.minX }
+            .filter { $0.text.count >= 2 }
+            .sorted { $0.rect.minX < $1.rect.minX }
+        for word in titleWords {
+            output.append(DetectedVisionControl(
+                type: "menubar-item",
+                label: word.text,
+                confidence: max(word.confidence, 0.8),
+                rect: word.rect.insetBy(dx: -4, dy: -3),
+                selected: nil,
+                controlCenter: CGPoint(x: word.rect.midX, y: word.rect.midY),
+                style: nil
+            ))
+        }
+
+        // Menu-bar-extra icons: whatever's left between the last app title
+        // (or the Apple region, if there are no app titles) and the clock,
+        // that ISN'T already explained by an OCR word — found via the same
+        // ink-blob scan used for the Dock, so it works regardless of which
+        // extras (WiFi, Battery, Bluetooth, ...) happen to be present.
+        // Y-range for the ink-blob scan: NOT the tight word-glyph band
+        // (barTop/barBottom) — that undershoots real icon glyphs, which
+        // extend a few px below the text baseline, and barTop sits close
+        // enough to the hard white(host titlebar)-to-blue(menu bar) edge
+        // that chromeHipassEnergy's radius-4 box average picks up that
+        // edge's huge local contrast regardless of x, fusing the whole
+        // extras strip into one giant "ink" blob. Start clear of that edge
+        // and use a generously-sized band — the connected-component scan
+        // bounds each blob to its own true extent regardless of how
+        // generous the search window is, so overshooting costs nothing.
+        let extrasLeft = (titleWords.last?.rect.maxX ?? appleRect.maxX) + 4
+        let extrasRegion = CGRect(
+            x: extrasLeft, y: barTop + 6,
+            width: max(0, clockRect.minX - extrasLeft - 4), height: 26
+        )
+        vcsDebug("chrome extrasRegion=\(extrasRegion) barTop=\(barTop) barBottom=\(barBottom) clockRect=\(clockRect)")
+        if extrasRegion.width > 8 {
+            // Only mask out words we actually TRUST as real text (menu
+            // titles + the clock cluster) — NOT every raw OCR token, since
+            // single-character icon misreads ("Q", "8") live in this same
+            // `words` list and must stay available to the ink-blob scan.
+            let trustedRects = (titleWords.map { $0.rect } + clockCluster.map { $0.rect })
+                .map { $0.insetBy(dx: -2, dy: -2) }
+            let rawBlobs = chromeInkBlobs(in: image, region: extrasRegion, minCount: 6)
+            vcsDebug("chrome rawBlobs=\(rawBlobs.map { ($0.rect, $0.pixelCount) })")
+            var blobs = rawBlobs
+                .filter { blob in !trustedRects.contains { $0.intersects(blob.rect) } }
+                .filter { $0.rect.width >= 8 && $0.rect.width <= 30 && $0.rect.height >= 8 && $0.rect.height <= 30 }
+                .sorted { $0.rect.minX < $1.rect.minX }
+
+            // Identify the two extras closest to the clock POSITIONALLY, not
+            // by shape: macOS keeps Spotlight and Control Center as fixed
+            // system items immediately left of the clock, in that order,
+            // regardless of which optional extras (WiFi, Battery, Bluetooth,
+            // ...) precede them. This was originally a fill-ratio shape
+            // classifier (hollow magnifying glass vs. solid toggle icon),
+            // calibrated at full resolution — but the default 720p downscale
+            // blurs the magnifying glass's hollow center enough that its
+            // fill ratio converges with Control Center's (0.776 vs. 0.782
+            // measured on the reference frame), so shape doesn't survive the
+            // resolution `vcs analyze` actually runs at. Position does.
+            // Only trusted when exactly 2+ blobs are found; a single leftover
+            // blob is ambiguous (could be either icon toggled off in System
+            // Settings) and stays generic.
+            if blobs.count >= 2 {
+                let cc = blobs.removeLast()
+                output.append(DetectedVisionControl(
+                    type: "menubar-item", label: "Control Center", confidence: 0.7,
+                    rect: cc.rect.insetBy(dx: -3, dy: -3), selected: nil,
+                    controlCenter: CGPoint(x: cc.rect.midX, y: cc.rect.midY), style: nil
+                ))
+                let spotlight = blobs.removeLast()
+                output.append(DetectedVisionControl(
+                    type: "menubar-item", label: "Spotlight", confidence: 0.7,
+                    rect: spotlight.rect.insetBy(dx: -3, dy: -3), selected: nil,
+                    controlCenter: CGPoint(x: spotlight.rect.midX, y: spotlight.rect.midY), style: nil
+                ))
+            }
+            for (i, blob) in blobs.enumerated() {
+                output.append(DetectedVisionControl(
+                    type: "menubar-item", label: "menu-extra-\(i + 1)", confidence: 0.55,
+                    rect: blob.rect.insetBy(dx: -3, dy: -3), selected: nil,
+                    controlCenter: CGPoint(x: blob.rect.midX, y: blob.rect.midY), style: nil
+                ))
+            }
+        }
+
+        return output
+    }
                }

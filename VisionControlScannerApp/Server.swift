@@ -130,6 +130,7 @@ enum Server {
             let image: String?
             let max_height: Int?
             let ping: Bool?
+            let include_chrome: Bool?
         }
 
         guard let req = try? JSONDecoder().decode(Request.self, from: line) else {
@@ -156,7 +157,11 @@ enum Server {
         let cap = req.max_height ?? defaultMaxHeight
         let result: AnalysisResult
         do {
-            result = try detector.analyze(cgImage: cg, maxHeight: cap > 0 ? cap : nil)
+            result = try detector.analyze(
+                cgImage: cg,
+                maxHeight: cap > 0 ? cap : nil,
+                includeChrome: req.include_chrome ?? false
+            )
         } catch {
             return errorJSON("analyze failed: \(error.localizedDescription)")
         }

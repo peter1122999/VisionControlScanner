@@ -7,6 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		1C739B54928745D5BA0AC47B /* VNCFramebuffer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B5049E7D9E74FF1960B4678 /* VNCFramebuffer.swift */; };
+		371779A7BF8C466B9DACA3E6 /* PaneDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1A56B5DCA8B48BDBB922AFD /* PaneDetector.swift */; };
 		4A5AB5D82FF488830077747D /* CLI+FindCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A5AB5D72FF488830077747D /* CLI+FindCard.swift */; };
 		4AA604442FEF5726005B1D09 /* SceneDefinition.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AA604432FEF5726005B1D09 /* SceneDefinition.swift */; };
 		4AA604462FEF5734005B1D09 /* SceneRegistry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AA604452FEF5734005B1D09 /* SceneRegistry.swift */; };
@@ -35,6 +37,8 @@
 
 /* Begin PBXFileReference section */
 		4A5AB5D72FF488830077747D /* CLI+FindCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "CLI+FindCard.swift"; sourceTree = "<group>"; };
+		E1A56B5DCA8B48BDBB922AFD /* PaneDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneDetector.swift; sourceTree = "<group>"; };
+		6B5049E7D9E74FF1960B4678 /* VNCFramebuffer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VNCFramebuffer.swift; sourceTree = "<group>"; };
 		4AA604432FEF5726005B1D09 /* SceneDefinition.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneDefinition.swift; sourceTree = "<group>"; };
 		4AA604452FEF5734005B1D09 /* SceneRegistry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneRegistry.swift; sourceTree = "<group>"; };
 		4AA6054A2FEF62FF005B1D09 /* CLI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLI.swift; sourceTree = "<group>"; };
@@ -86,6 +90,8 @@
 			isa = PBXGroup;
 			children = (
 				4A5AB5D72FF488830077747D /* CLI+FindCard.swift */,
+				E1A56B5DCA8B48BDBB922AFD /* PaneDetector.swift */,
+				6B5049E7D9E74FF1960B4678 /* VNCFramebuffer.swift */,
 				4AA6056B2FF32859005B1D09 /* Scenes */,
 				4AA604432FEF5726005B1D09 /* SceneDefinition.swift */,
 				4AA604452FEF5734005B1D09 /* SceneRegistry.swift */,
@@ -226,6 +232,8 @@
 				4AA604462FEF5734005B1D09 /* SceneRegistry.swift in Sources */,
 				A4 /* Utilities.swift in Sources */,
 				4A5AB5D82FF488830077747D /* CLI+FindCard.swift in Sources */,
+				371779A7BF8C466B9DACA3E6 /* PaneDetector.swift in Sources */,
+				1C739B54928745D5BA0AC47B /* VNCFramebuffer.swift in Sources */,
 				A5 /* VisionControlDetector.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

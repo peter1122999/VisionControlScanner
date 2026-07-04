@@ -25,6 +25,10 @@ enum CLI {
             watch(Array(userArgs.dropFirst()))
         case "serve":
             serve(Array(userArgs.dropFirst()))
+        case "vnc-screenshot":
+            vncScreenshot(Array(userArgs.dropFirst()))
+        case "vnc-watch":
+            vncWatch(Array(userArgs.dropFirst()))
         case "--help", "-h", "help":
             printUsage()
             exit(0)
@@ -47,6 +51,7 @@ enum CLI {
         var prettyPrint = true
         var maxHeight: Int = 720
         var format: String = "default"   // "default" | "tart"
+        var includeChrome = false
 
         var i = 0
         while i < args.count {
@@ -66,6 +71,8 @@ enum CLI {
                 maxHeight = h; i += 2
             case "--full-resolution":
                 maxHeight = 0; i += 1
+            case "--include-chrome":
+                includeChrome = true; i += 1
             case "--format":
                 guard i + 1 < args.count else { fatal("Missing value for --format") }
                 format = args[i + 1].lowercased()
@@ -90,7 +97,8 @@ enum CLI {
         let result = analyzeViaServerOrLocal(
             imagePath: inputPath,
             cgImage: cgImage,
-            maxHeight: cap
+            maxHeight: cap,
+            includeChrome: includeChrome
         )
         let payload: String
         if jsonMode {
@@ -101,7 +109,8 @@ enum CLI {
                     sourcePath: inputPath,
                     imageWidth: cgImage.width,
                     imageHeight: cgImage.height,
-                    pretty: prettyPrint
+                    pretty: prettyPrint,
+                    cgImage: cgImage
                 )
             default:
                 payload = encodeJSON(
@@ -120,7 +129,8 @@ enum CLI {
     private static func analyzeViaServerOrLocal(
         imagePath: String,
         cgImage: CGImage,
-        maxHeight: Int?
+        maxHeight: Int?,
+        includeChrome: Bool = false
     ) -> AnalysisResult {
         let env = ProcessInfo.processInfo.environment
         let envSocket = env["VCS_SOCKET"]
@@ -134,14 +144,15 @@ enum CLI {
             if let serverResult = ServerClient.analyze(
                 socketPath: sp,
                 imagePath: imagePath,
-                maxHeight: maxHeight
+                maxHeight: maxHeight,
+                includeChrome: includeChrome
             ) {
                 return serverResult
             }
         }
         let detector = VisionControlDetector()
         do {
-            return try detector.analyze(cgImage: cgImage, maxHeight: maxHeight)
+            return try detector.analyze(cgImage: cgImage, maxHeight: maxHeight, includeChrome: includeChrome)
         } catch {
             fatal("Analysis failed: \(error.localizedDescription)")
         }
@@ -215,7 +226,8 @@ enum CLI {
                         sourcePath: imageURL.path,
                         imageWidth: cgImage.width,
                         imageHeight: cgImage.height,
-                        pretty: false
+                        pretty: false,
+                        cgImage: cgImage
                     )
                 default:
                     payload = encodeJSON(
@@ -262,6 +274,174 @@ enum CLI {
         } catch {
             fatal("serve failed: \(error.localizedDescription)")
         }
+    }
+
+    // MARK: - vnc-screenshot / vnc-watch
+
+    private struct VNCArgs {
+        var host: String?
+        var port: UInt16 = 5900
+        var password: String?
+        var outputPath: String?
+        var format: String = "none"   // "none" | "default" | "tart"
+        var jsonOutputPath: String?
+        var maxHeight: Int = 720
+        var prettyPrint = true
+        var intervalMillis: Int = 1000
+    }
+
+    private static func parseVNCArgs(_ args: [String], usage: String) -> VNCArgs {
+        var v = VNCArgs()
+        var i = 0
+        while i < args.count {
+            let arg = args[i]
+            switch arg {
+            case "--host":
+                guard i + 1 < args.count else { fatal("Missing value for --host") }
+                v.host = args[i + 1]; i += 2
+            case "--port":
+                guard i + 1 < args.count, let p = UInt16(args[i + 1]) else {
+                    fatal("Missing or invalid value for --port")
+                }
+                v.port = p; i += 2
+            case "--password":
+                guard i + 1 < args.count else { fatal("Missing value for --password") }
+                v.password = args[i + 1]; i += 2
+            case "-o", "--output":
+                guard i + 1 < args.count else { fatal("Missing value for \(arg)") }
+                v.outputPath = args[i + 1]; i += 2
+            case "--format":
+                guard i + 1 < args.count else { fatal("Missing value for --format") }
+                v.format = args[i + 1].lowercased()
+                guard v.format == "default" || v.format == "tart" else {
+                    fatal("--format must be 'default' or 'tart'")
+                }
+                i += 2
+            case "--json-output":
+                guard i + 1 < args.count else { fatal("Missing value for --json-output") }
+                v.jsonOutputPath = args[i + 1]; i += 2
+            case "--max-height":
+                guard i + 1 < args.count, let h = Int(args[i + 1]) else {
+                    fatal("Missing or invalid value for --max-height")
+                }
+                v.maxHeight = h; i += 2
+            case "--full-resolution":
+                v.maxHeight = 0; i += 1
+            case "--compact":
+                v.prettyPrint = false; i += 1
+            case "--interval-ms":
+                guard i + 1 < args.count, let ms = Int(args[i + 1]) else {
+                    fatal("Missing or invalid value for --interval-ms")
+                }
+                v.intervalMillis = ms; i += 2
+            default:
+                fatal("Unexpected argument: \(arg)\n\(usage)")
+            }
+        }
+        guard v.host != nil else { fatal("--host is required\n\(usage)") }
+        if v.password == nil {
+            v.password = ProcessInfo.processInfo.environment["CGTOOL_VNC_PASSWORD"]
+        }
+        return v
+    }
+
+    /// One-shot VNC framebuffer pull. Connects, grabs a single frame, and
+    /// either saves it as a PNG (-o), runs it through the same
+    /// analyze/encode pipeline as `analyze <file>` (--format), or both.
+    /// The connection's whole lifetime is this one process — "no
+    /// disconnect until VCS is done running" holds trivially here; see
+    /// vnc-watch for the form that keeps one connection alive across many
+    /// pulls.
+    private static func vncScreenshot(_ args: [String]) {
+        let usage = "usage: vcs vnc-screenshot --host <h> [--port <p>] [--password <pw>] " +
+            "[-o out.png] [--format default|tart] [--json-output out.json] [--compact] " +
+            "[--max-height N | --full-resolution]"
+        let v = parseVNCArgs(args, usage: usage)
+        guard v.outputPath != nil || v.format != "none" else {
+            fatal("vnc-screenshot: need at least one of -o or --format\n\(usage)")
+        }
+
+        let image = captureOneFrame(host: v.host!, port: v.port, password: v.password)
+        emitFrame(image, host: v.host!, port: v.port, v: v)
+    }
+
+    /// Long-running form: one VNCFramebufferConnection is opened once and
+    /// reused for every pull in the loop — the actual "keep the session
+    /// alive" behavior, analogous to how `vcs serve` holds one
+    /// VisionControlDetector across every request instead of
+    /// re-initializing per call. Runs until killed (Ctrl-C / SIGTERM) or
+    /// the VNC server drops the connection.
+    private static func vncWatch(_ args: [String]) {
+        let usage = "usage: vcs vnc-watch --host <h> [--port <p>] [--password <pw>] " +
+            "-o outdir [--interval-ms 1000] [--format default|tart] [--max-height N]"
+        let v = parseVNCArgs(args, usage: usage)
+        guard let outputPath = v.outputPath else { fatal("vnc-watch requires -o <dir>\n\(usage)") }
+        try? FileManager.default.createDirectory(atPath: outputPath, withIntermediateDirectories: true)
+
+        let conn: VNCFramebufferConnection
+        do {
+            conn = try VNCFramebufferConnection(host: v.host!, port: v.port, password: v.password)
+        } catch {
+            fatal("vnc-watch: \(error.localizedDescription)")
+        }
+        FileHandle.standardError.write(Data(
+            "vcs vnc-watch: connected to \(v.host!):\(v.port), writing to \(outputPath)\n".utf8
+        ))
+
+        var frameIndex = 0
+        while true {
+            let image: CGImage
+            do {
+                image = try conn.captureFrame()
+            } catch {
+                fatal("vnc-watch: capture failed after \(frameIndex) frame(s): \(error.localizedDescription)")
+            }
+            var frameV = v
+            let base = String(format: "frame-%06d", frameIndex)
+            frameV.outputPath = "\(outputPath)/\(base).png"
+            if v.format != "none" {
+                frameV.jsonOutputPath = v.jsonOutputPath ?? "\(outputPath)/\(base).json"
+            }
+            emitFrame(image, host: v.host!, port: v.port, v: frameV)
+            frameIndex += 1
+            usleep(useconds_t(max(0, v.intervalMillis) * 1000))
+        }
+    }
+
+    private static func captureOneFrame(host: String, port: UInt16, password: String?) -> CGImage {
+        do {
+            let conn = try VNCFramebufferConnection(host: host, port: port, password: password)
+            return try conn.captureFrame()
+        } catch {
+            fatal("vnc-screenshot: \(error.localizedDescription)")
+        }
+    }
+
+    private static func emitFrame(_ image: CGImage, host: String, port: UInt16, v: VNCArgs) {
+        if let outputPath = v.outputPath {
+            do {
+                try VNCFramebufferIO.savePNG(image, to: outputPath)
+            } catch {
+                fatal("vnc-screenshot: failed to save PNG: \(error.localizedDescription)")
+            }
+        }
+        guard v.format != "none" else { return }
+
+        let sourceTag = "(vnc:\(host):\(port))"
+        let cap = v.maxHeight > 0 ? v.maxHeight : nil
+        let result = analyzeViaServerOrLocal(imagePath: sourceTag, cgImage: image, maxHeight: cap)
+        let payload: String
+        switch v.format {
+        case "tart":
+            payload = encodeTartJSON(
+                result: result, sourcePath: sourceTag,
+                imageWidth: image.width, imageHeight: image.height,
+                pretty: v.prettyPrint, cgImage: image
+            )
+        default:
+            payload = encodeJSON(result: result, sourcePath: sourceTag, pretty: v.prettyPrint)
+        }
+        write(payload, to: v.jsonOutputPath)
     }
 
     // MARK: - Encoders
@@ -374,7 +554,8 @@ enum CLI {
         sourcePath: String,
         imageWidth: Int,
         imageHeight: Int,
-        pretty: Bool
+        pretty: Bool,
+        cgImage: CGImage? = nil
     ) -> String {
         struct Tart: Encodable {
             struct Screen: Encodable {
@@ -408,11 +589,16 @@ enum CLI {
                 let bbox: Rect
                 let confidence: Double
             }
+            struct Panes: Encodable {
+                let sidebar: Rect
+                let content: Rect
+            }
             let source: String
             let screen: Screen
             let scene: String?
             let controls: [Control]
             let ocr: [OCR]
+            let panes: Panes?
         }
         func tartRect(from box: CGRect) -> Tart.Rect {
             let px = Int((box.minX * CGFloat(imageWidth)).rounded())
@@ -474,12 +660,20 @@ enum CLI {
                 ))
             }
         }
+        var panes: Tart.Panes? = nil
+        if let cgImage, let detected = PaneDetector.detect(cgImage: cgImage) {
+            func rect(from r: CGRect) -> Tart.Rect {
+                Tart.Rect(x: Int(r.minX), y: Int(r.minY), w: Int(r.width), h: Int(r.height))
+            }
+            panes = Tart.Panes(sidebar: rect(from: detected.sidebar), content: rect(from: detected.content))
+        }
         let out = Tart(
             source: sourcePath,
             screen: Tart.Screen(width: imageWidth, height: imageHeight),
             scene: scene,
             controls: controls,
-            ocr: ocr
+            ocr: ocr,
+            panes: panes
         )
         let encoder = JSONEncoder()
         encoder.outputFormatting = pretty
@@ -587,7 +781,7 @@ enum CLI {
         Usage:
           vcs analyze <image> [-o out.json] [--text] [--compact]
                               [--max-height N | --full-resolution]
-                              [--format default|tart]
+                              [--format default|tart] [--include-chrome]
           vcs watch   <folder> [-o output-dir]
                                [--max-height N | --full-resolution]
                                [--format default|tart]
@@ -602,6 +796,15 @@ enum CLI {
           --full-resolution  Skip downscaling.
           --format tart      Emit JSON shaped for packer-plugin-tart-uiautomate
                              (pixel-space coords, top-left origin, scene field).
+          --include-chrome   Also detect the OS's own menu bar (Apple menu,
+                             app menu titles, Spotlight, Control Center,
+                             clock) and Dock icons, anywhere in the image —
+                             not just inside a Setup Assistant card. Off by
+                             default (adds an extra OCR pass; only useful once
+                             past Setup Assistant, e.g. driving Terminal or
+                             System Settings via the VM's own UI instead of
+                             host-global hotkeys the VM can't receive).
+                             Roles: "menubar" and "dock".
 
         watch
           Watch a folder for new image files and emit JSON for each.
@@ -623,7 +826,8 @@ private enum ServerClient {
     static func analyze(
         socketPath: String,
         imagePath: String,
-        maxHeight: Int?
+        maxHeight: Int?,
+        includeChrome: Bool = false
     ) -> AnalysisResult? {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { return nil }
@@ -651,6 +855,7 @@ private enum ServerClient {
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
         var req: [String: Any] = ["image": imagePath]
         if let maxHeight { req["max_height"] = maxHeight }
+        if includeChrome { req["include_chrome"] = true }
         guard let body = try? JSONSerialization.data(withJSONObject: req) else {
             return nil
         }
